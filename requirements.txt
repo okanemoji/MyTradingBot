@@ -3,3 +3,4 @@ python-binance
 python-dotenv
 gspread
 gunicorn
+oauth2client
