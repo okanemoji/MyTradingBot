@@ -39,7 +39,7 @@ if os.environ.get('GOOGLE_SHEET_CREDENTIALS'):
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
         gc = gspread.authorize(creds)
-        sheet = gc.open("Binance Trading Bot Log").sheet1 # Replace "Binance Trading Bot Log" with your actual Google Sheet name
+        sheet = gc.open("TradingBot_Signals").sheet1 # Replace "Binance Trading Bot Log" with your actual Google Sheet name
         google_sheet_initialized = True
         print("Google Sheet initialized successfully.")
     except Exception as e:
