@@ -4,8 +4,8 @@ import time
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
-import gspread # Make sure this is installed: pip install gspread
-from oauth2client.service_account import ServiceAccountCredentials # pip install oauth2client
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 
@@ -17,8 +17,9 @@ api_secret = os.environ.get('BINANCE_API_SECRET')
 client = None
 if api_key and api_secret:
     try:
-        client = Client(api_key, api_secret)
-        print("Binance client initialized successfully.")
+        # *** แก้ไข: กำหนด base_url สำหรับ Binance Futures Testnet ***
+        client = Client(api_key, api_secret, base_url="https://testnet.binancefuture.com")
+        print("Binance Futures Testnet client initialized successfully.")
     except Exception as e:
         print(f"Error initializing Binance client: {e}")
         client = None
@@ -26,12 +27,9 @@ else:
     print("Binance API keys not found in environment variables. Trading functions will be disabled.")
 
 # --- Google Sheet Configuration ---
-# Make sure your Google Sheet credentials JSON is set as an environment variable
-# 'GOOGLE_SHEET_CREDENTIALS' in Render, or 'GOOGLE_APPLICATION_CREDENTIALS' in local setup
 google_sheet_initialized = False
 sheet = None
 
-# For Render deployment, use GOOGLE_SHEET_CREDENTIALS env var
 if os.environ.get('GOOGLE_SHEET_CREDENTIALS'):
     try:
         creds_json_str = os.environ.get('GOOGLE_SHEET_CREDENTIALS')
@@ -48,52 +46,63 @@ if os.environ.get('GOOGLE_SHEET_CREDENTIALS'):
 else:
     print("Google Sheet credentials not found in environment variables. Logging to Google Sheet will be disabled.")
 
-# --- Trading Logic (simplified for example) ---
+# --- Trading Logic ---
 def place_order(signal_type, symbol, price, order_size_usd, sl_price):
     if not client:
         print(f"Binance client not initialized. Cannot place order for {symbol}.")
         return False
 
     try:
-        # Get current ticker price to calculate quantity based on USD value
-        ticker = client.get_ticker(symbol=symbol)
-        current_price = float(ticker['lastPrice'])
+        # *** แก้ไข: ใช้ futures_get_ticker สำหรับราคา Futures ***
+        ticker = client.futures_mark_price(symbol=symbol)
+        current_price = float(ticker['markPrice']) # ใช้ markPrice สำหรับการคำนวณใน Futures
+        
+        # *** แก้ไข: ใช้ futures_exchange_info เพื่อดึงข้อมูล Futures Symbol ***
+        exchange_info = client.futures_exchange_info()
+        symbol_info = next((item for item in exchange_info['symbols'] if item['symbol'] == symbol), None)
+        
+        if not symbol_info:
+            print(f"Error: Symbol {symbol} not found in Futures exchange info.")
+            return False
 
-        # Calculate quantity (assuming market order or very close to current price)
-        # Adjust based on your symbol's precision
-        # Example: quantity = order_size_usd / current_price
-        # You need to implement proper quantity calculation and precision handling
-        # This is a placeholder
+        # ดึง filters ที่ถูกต้องสำหรับ Futures
+        min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
+        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MARKET_LOT_SIZE'), None) # หรือ LOT_SIZE ขึ้นอยู่กับประเภทของ Futures
+
+        if not min_notional_filter or not lot_size_filter:
+            print(f"Error: Could not find MIN_NOTIONAL or MARKET_LOT_SIZE filter for {symbol}.")
+            return False
+
+        min_notional = float(min_notional_filter['minNotional'])
+        step_size = float(lot_size_filter['stepSize']) # Step size for quantity
+        
+        # ไม่จำเป็นต้องใช้ tick_size ถ้าใช้ Market Order และไม่ได้ตรวจสอบ price precision อย่างละเอียด
+        # tick_size = float(next(f['tickSize'] for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER'))
+
+        # Calculate quantity
         quantity = order_size_usd / current_price 
         
-        # Get symbol info to determine price and quantity precision
-        info = client.get_symbol_info(symbol)
-        min_notional = float([f['minNotional'] for f in info['filters'] if f['filterType'] == 'MIN_NOTIONAL'][0])
-        step_size = float([f['stepSize'] for f in info['filters'] if f['filterType'] == 'LOT_SIZE'][0])
-        tick_size = float([f['tickSize'] for f in info['filters'] if f['filterType'] == 'PRICE_FILTER'][0])
-
         # Apply quantity precision
         quantity = client.quantize_quantity(quantity, step_size)
         
         # Check minNotional
         if quantity * current_price < min_notional:
-            print(f"Calculated quantity {quantity} * {current_price} is below minNotional {min_notional} for {symbol}. Adjusting quantity...")
-            # You might need to adjust quantity up to meet minNotional or handle this case
-            # For simplicity, returning False if cannot meet minNotional with current logic
+            print(f"Calculated quantity {quantity} * {current_price} is below minNotional {min_notional} for {symbol}. Cannot place order.")
             return False
 
         print(f"Attempting to place {signal_type} order for {quantity} {symbol} at price {current_price} USD_value: {order_size_usd}")
 
         order = None
+        # *** แก้ไข: ใช้ client.futures_create_order สำหรับ Futures ***
         if signal_type == 'BUY':
-            order = client.create_order(
+            order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_BUY,
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
         elif signal_type == 'SELL':
-            order = client.create_order(
+            order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_SELL,
                 type=ORDER_TYPE_MARKET,
@@ -124,7 +133,6 @@ def webhook():
             print(f"Received webhook data: {data}")
 
             # --- IMPORTANT: Check for ping signal FIRST ---
-            # This ensures that ping requests don't trigger trading logic or errors.
             if data.get('type') == 'ping':
                 timestamp_ping = data.get('timestamp', time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()))
                 print(f"Received Keep-alive ping from TradingView at {timestamp_ping}.")
@@ -147,13 +155,10 @@ def webhook():
             # Log to Google Sheet
             if google_sheet_initialized:
                 try:
-                    # Make sure the sheet name in gc.open("YOUR SHEET NAME") is correct
-                    # and the sheet has columns for this data
                     sheet.append_row([timestamp, signal_type, symbol, price, order_size_usd, sl_price, json.dumps(data)])
                     print(f"Signal logged to Google Sheet: {signal_type} {symbol}")
                 except Exception as e:
                     print(f"Error logging to Google Sheet: {e}")
-                    # If Google Sheet logging fails, it should not stop trading
             else:
                 print("Google Sheet not initialized, skipping log.")
 
@@ -179,7 +184,6 @@ def health_check():
 
 # --- Main entry point for Flask ---
 if __name__ == '__main__':
-    # Use environment variable for port, default to 5000 for local testing
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
-    print("Flask app is starting...") # This line will likely not be seen on Render directly if Gunicorn is used
+    print("Flask app is starting...")
