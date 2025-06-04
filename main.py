@@ -17,9 +17,9 @@ api_secret = os.environ.get('BINANCE_API_SECRET')
 client = None
 if api_key and api_secret:
     try:
-        # *** แก้ไข: กำหนด base_url สำหรับ Binance Futures Testnet ***
-        client = Client(api_key, api_secret, base_url="https://testnet.binancefuture.com")
-        print("Binance Futures Testnet client initialized successfully.")
+        # *** แก้ไข: ใช้ testnet=True แทน base_url ***
+        client = Client(api_key, api_secret, testnet=True)
+        print("Binance Futures Testnet client initialized successfully using testnet=True.")
     except Exception as e:
         print(f"Error initializing Binance client: {e}")
         client = None
@@ -53,11 +53,11 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
         return False
 
     try:
-        # *** แก้ไข: ใช้ futures_get_ticker สำหรับราคา Futures ***
+        # ใช้ futures_mark_price สำหรับราคา Futures
         ticker = client.futures_mark_price(symbol=symbol)
-        current_price = float(ticker['markPrice']) # ใช้ markPrice สำหรับการคำนวณใน Futures
+        current_price = float(ticker['markPrice'])
         
-        # *** แก้ไข: ใช้ futures_exchange_info เพื่อดึงข้อมูล Futures Symbol ***
+        # ใช้ futures_exchange_info เพื่อดึงข้อมูล Futures Symbol
         exchange_info = client.futures_exchange_info()
         symbol_info = next((item for item in exchange_info['symbols'] if item['symbol'] == symbol), None)
         
@@ -67,18 +67,17 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
 
         # ดึง filters ที่ถูกต้องสำหรับ Futures
         min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
-        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MARKET_LOT_SIZE'), None) # หรือ LOT_SIZE ขึ้นอยู่กับประเภทของ Futures
+        # ตรวจสอบ filterType สำหรับ step_size ใน Futures (อาจเป็น LOT_SIZE หรือ MARKET_LOT_SIZE)
+        # ลองใช้ MARKET_LOT_SIZE ก่อน หากยัง error อาจจะต้องลอง LOT_SIZE หรือดูจาก docs ของ Binance Futures
+        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MARKET_LOT_SIZE'), None) 
 
         if not min_notional_filter or not lot_size_filter:
             print(f"Error: Could not find MIN_NOTIONAL or MARKET_LOT_SIZE filter for {symbol}.")
             return False
 
         min_notional = float(min_notional_filter['minNotional'])
-        step_size = float(lot_size_filter['stepSize']) # Step size for quantity
+        step_size = float(lot_size_filter['stepSize'])
         
-        # ไม่จำเป็นต้องใช้ tick_size ถ้าใช้ Market Order และไม่ได้ตรวจสอบ price precision อย่างละเอียด
-        # tick_size = float(next(f['tickSize'] for f in symbol_info['filters'] if f['filterType'] == 'PRICE_FILTER'))
-
         # Calculate quantity
         quantity = order_size_usd / current_price 
         
@@ -93,7 +92,7 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
         print(f"Attempting to place {signal_type} order for {quantity} {symbol} at price {current_price} USD_value: {order_size_usd}")
 
         order = None
-        # *** แก้ไข: ใช้ client.futures_create_order สำหรับ Futures ***
+        # ใช้ client.futures_create_order สำหรับ Futures
         if signal_type == 'BUY':
             order = client.futures_create_order(
                 symbol=symbol,
