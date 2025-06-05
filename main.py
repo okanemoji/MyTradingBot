@@ -62,22 +62,29 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
             print(f"Error: Symbol {symbol} not found in Futures exchange info.")
             return False
 
-        # --- แก้ไขส่วนนี้: ดึง Filters อย่างแข็งแรงมากขึ้น ---
-        min_notional = None
-        step_size = None
+        # --- แก้ไขส่วนนี้: ดึง Filters อย่างแข็งแรงมากขึ้นไปอีกขั้น ---
+        min_notional_value = None
+        step_size_value = None
         
         for f in symbol_info['filters']:
             if f['filterType'] == 'MIN_NOTIONAL':
-                min_notional = float(f.get('minNotional')) # ใช้ .get() เพื่อป้องกัน KeyError
+                # ตรวจสอบว่ามี 'minNotional' key อยู่ใน dictionary 'f' ก่อนแปลงเป็น float
+                if 'minNotional' in f:
+                    min_notional_value = float(f['minNotional'])
             elif f['filterType'] == 'MARKET_LOT_SIZE': # หรือ 'LOT_SIZE' ถ้า MARKET_LOT_SIZE ไม่พบ
-                step_size = float(f.get('stepSize')) # ใช้ .get()
+                # ตรวจสอบว่ามี 'stepSize' key อยู่ใน dictionary 'f' ก่อนแปลงเป็น float
+                if 'stepSize' in f:
+                    step_size_value = float(f['stepSize'])
         
         # ตรวจสอบว่าได้ค่า min_notional และ step_size มาครบถ้วน
-        if min_notional is None or step_size is None:
-            print(f"Error: Could not find all required filters (MIN_NOTIONAL and MARKET_LOT_SIZE/LOT_SIZE) for {symbol}.")
+        if min_notional_value is None or step_size_value is None:
+            print(f"Error: Could not find all required filters (MIN_NOTIONAL and MARKET_LOT_SIZE/LOT_SIZE) with valid values for {symbol}.")
             # สามารถเพิ่มรายละเอียดใน logs ได้ เช่น:
-            # print(f"Available filters: {symbol_info['filters']}")
+            # print(f"Available filters for {symbol}: {symbol_info['filters']}")
             return False
+
+        min_notional = min_notional_value
+        step_size = step_size_value
         # --- สิ้นสุดการแก้ไขส่วนดึง Filters ---
 
         # Calculate quantity
