@@ -17,7 +17,6 @@ api_secret = os.environ.get('BINANCE_API_SECRET')
 client = None
 if api_key and api_secret:
     try:
-        # *** แก้ไข: ใช้ testnet=True แทน base_url ***
         client = Client(api_key, api_secret, testnet=True)
         print("Binance Futures Testnet client initialized successfully using testnet=True.")
     except Exception as e:
@@ -53,11 +52,9 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
         return False
 
     try:
-        # ใช้ futures_mark_price สำหรับราคา Futures
         ticker = client.futures_mark_price(symbol=symbol)
         current_price = float(ticker['markPrice'])
         
-        # ใช้ futures_exchange_info เพื่อดึงข้อมูล Futures Symbol
         exchange_info = client.futures_exchange_info()
         symbol_info = next((item for item in exchange_info['symbols'] if item['symbol'] == symbol), None)
         
@@ -65,19 +62,24 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
             print(f"Error: Symbol {symbol} not found in Futures exchange info.")
             return False
 
-        # ดึง filters ที่ถูกต้องสำหรับ Futures
-        min_notional_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MIN_NOTIONAL'), None)
-        # ตรวจสอบ filterType สำหรับ step_size ใน Futures (อาจเป็น LOT_SIZE หรือ MARKET_LOT_SIZE)
-        # ลองใช้ MARKET_LOT_SIZE ก่อน หากยัง error อาจจะต้องลอง LOT_SIZE หรือดูจาก docs ของ Binance Futures
-        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'MARKET_LOT_SIZE'), None) 
-
-        if not min_notional_filter or not lot_size_filter:
-            print(f"Error: Could not find MIN_NOTIONAL or MARKET_LOT_SIZE filter for {symbol}.")
-            return False
-
-        min_notional = float(min_notional_filter['minNotional'])
-        step_size = float(lot_size_filter['stepSize'])
+        # --- แก้ไขส่วนนี้: ดึง Filters อย่างแข็งแรงมากขึ้น ---
+        min_notional = None
+        step_size = None
         
+        for f in symbol_info['filters']:
+            if f['filterType'] == 'MIN_NOTIONAL':
+                min_notional = float(f.get('minNotional')) # ใช้ .get() เพื่อป้องกัน KeyError
+            elif f['filterType'] == 'MARKET_LOT_SIZE': # หรือ 'LOT_SIZE' ถ้า MARKET_LOT_SIZE ไม่พบ
+                step_size = float(f.get('stepSize')) # ใช้ .get()
+        
+        # ตรวจสอบว่าได้ค่า min_notional และ step_size มาครบถ้วน
+        if min_notional is None or step_size is None:
+            print(f"Error: Could not find all required filters (MIN_NOTIONAL and MARKET_LOT_SIZE/LOT_SIZE) for {symbol}.")
+            # สามารถเพิ่มรายละเอียดใน logs ได้ เช่น:
+            # print(f"Available filters: {symbol_info['filters']}")
+            return False
+        # --- สิ้นสุดการแก้ไขส่วนดึง Filters ---
+
         # Calculate quantity
         quantity = order_size_usd / current_price 
         
@@ -92,7 +94,6 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
         print(f"Attempting to place {signal_type} order for {quantity} {symbol} at price {current_price} USD_value: {order_size_usd}")
 
         order = None
-        # ใช้ client.futures_create_order สำหรับ Futures
         if signal_type == 'BUY':
             order = client.futures_create_order(
                 symbol=symbol,
@@ -146,12 +147,10 @@ def webhook():
             sl_price = float(data.get('SL Price')) if data.get('SL Price') else 0
             timestamp = data.get('Timestamp', time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()))
 
-            # Validate essential trading signal data
             if not all([signal_type, symbol, order_size_usd > 0]):
                 print(f"Error: Missing essential data for trading signal. Received: {data}")
                 return jsonify({"status": "error", "message": "Missing essential data for trading signal."}), 400
 
-            # Log to Google Sheet
             if google_sheet_initialized:
                 try:
                     sheet.append_row([timestamp, signal_type, symbol, price, order_size_usd, sl_price, json.dumps(data)])
@@ -161,7 +160,6 @@ def webhook():
             else:
                 print("Google Sheet not initialized, skipping log.")
 
-            # Place order on Binance
             order_success = place_order(signal_type, symbol, price, order_size_usd, sl_price)
             if order_success:
                 return jsonify({"status": "success", "message": "Signal processed and order placed"}), 200
