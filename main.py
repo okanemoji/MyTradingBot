@@ -62,25 +62,27 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
             print(f"Error: Symbol {symbol} not found in Futures exchange info.")
             return False
 
-        # --- แก้ไขส่วนนี้: ดึง Filters อย่างแข็งแรงมากขึ้นไปอีกขั้น ---
+        # --- แก้ไขส่วนนี้: ดึง Filters อย่างแข็งแรงมากขึ้นไปอีกขั้นและเพิ่ม Debug Print ---
         min_notional_value = None
         step_size_value = None
         
         for f in symbol_info['filters']:
             if f['filterType'] == 'MIN_NOTIONAL':
-                # ตรวจสอบว่ามี 'minNotional' key อยู่ใน dictionary 'f' ก่อนแปลงเป็น float
                 if 'minNotional' in f:
                     min_notional_value = float(f['minNotional'])
-            elif f['filterType'] == 'MARKET_LOT_SIZE': # หรือ 'LOT_SIZE' ถ้า MARKET_LOT_SIZE ไม่พบ
-                # ตรวจสอบว่ามี 'stepSize' key อยู่ใน dictionary 'f' ก่อนแปลงเป็น float
+            elif f['filterType'] == 'MARKET_LOT_SIZE': # ลอง MARKET_LOT_SIZE ก่อน
+                if 'stepSize' in f:
+                    step_size_value = float(f['stepSize'])
+            elif f['filterType'] == 'LOT_SIZE': # ถ้าไม่เจอ MARKET_LOT_SIZE ให้ลอง LOT_SIZE ด้วย
                 if 'stepSize' in f:
                     step_size_value = float(f['stepSize'])
         
         # ตรวจสอบว่าได้ค่า min_notional และ step_size มาครบถ้วน
         if min_notional_value is None or step_size_value is None:
             print(f"Error: Could not find all required filters (MIN_NOTIONAL and MARKET_LOT_SIZE/LOT_SIZE) with valid values for {symbol}.")
-            # สามารถเพิ่มรายละเอียดใน logs ได้ เช่น:
-            # print(f"Available filters for {symbol}: {symbol_info['filters']}")
+            # --- เพิ่มบรรทัดนี้: พิมพ์ Filters ทั้งหมดเพื่อการ Debug ---
+            print(f"Available filters for {symbol}: {symbol_info['filters']}")
+            # --- สิ้นสุดการเพิ่ม ---
             return False
 
         min_notional = min_notional_value
