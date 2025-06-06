@@ -9,6 +9,24 @@ from oauth2client.service_account import ServiceAccountCredentials
 
 app = Flask(__name__)
 
+# --- Helper function for quantity quantization ---
+# เพิ่มฟังก์ชันนี้เข้าไปในโค้ดของคุณ
+def quantize_quantity(quantity, step_size):
+    """
+    Quantizes a quantity to the correct number of decimal places based on the step_size.
+    Example: quantize_quantity(0.001234, 0.001) -> 0.001
+             quantize_quantity(1.2345, 0.01) -> 1.23
+    """
+    # Determine the number of decimal places from step_size
+    step_size_str = str(step_size)
+    if '.' in step_size_str:
+        decimal_places = len(step_size_str.split('.')[1])
+    else:
+        decimal_places = 0
+    
+    # Format the quantity to the determined decimal places and convert back to float
+    return float(f'{quantity:.{decimal_places}f}')
+
 # --- Binance API Configuration ---
 # Get API keys from environment variables
 api_key = os.environ.get('BINANCE_API_KEY')
@@ -62,13 +80,11 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
             print(f"Error: Symbol {symbol} not found in Futures exchange info.")
             return False
 
-        # --- แก้ไขส่วนนี้: แก้ชื่อ Key สำหรับ MIN_NOTIONAL filter ---
         min_notional_value = None
         step_size_value = None
         
         for f in symbol_info['filters']:
             if f['filterType'] == 'MIN_NOTIONAL':
-                # เปลี่ยนจาก 'minNotional' เป็น 'notional'
                 if 'notional' in f: 
                     min_notional_value = float(f['notional']) 
             elif f['filterType'] == 'MARKET_LOT_SIZE':
@@ -78,7 +94,6 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
                 if 'stepSize' in f:
                     step_size_value = float(f['stepSize'])
         
-        # ตรวจสอบว่าได้ค่า min_notional และ step_size มาครบถ้วน
         if min_notional_value is None or step_size_value is None:
             print(f"Error: Could not find all required filters (MIN_NOTIONAL and MARKET_LOT_SIZE/LOT_SIZE) with valid values for {symbol}.")
             print(f"Available filters for {symbol}: {symbol_info['filters']}")
@@ -86,14 +101,13 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
 
         min_notional = min_notional_value
         step_size = step_size_value
-        # --- สิ้นสุดการแก้ไขส่วนดึง Filters ---
 
         # Calculate quantity
         quantity = order_size_usd / current_price 
         
-        # Apply quantity precision
-        quantity = client.quantize_quantity(quantity, step_size)
-        
+        # Apply quantity precision - เรียกใช้ฟังก์ชันที่เราเพิ่มเข้ามา
+        quantity = quantize_quantity(quantity, step_size) # เปลี่ยนจาก client.quantize_quantity เป็น quantize_quantity
+
         # Check minNotional
         if quantity * current_price < min_notional:
             print(f"Calculated quantity {quantity} * {current_price} is below minNotional {min_notional} for {symbol}. Cannot place order.")
