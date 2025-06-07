@@ -6,25 +6,24 @@ from binance.client import Client
 from binance.enums import *
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
+# Import BinanceAPIException
+from binance.exceptions import BinanceAPIException, BinanceRequestException
 
 app = Flask(__name__)
 
 # --- Helper function for quantity quantization ---
-# เพิ่มฟังก์ชันนี้เข้าไปในโค้ดของคุณ
 def quantize_quantity(quantity, step_size):
     """
     Quantizes a quantity to the correct number of decimal places based on the step_size.
     Example: quantize_quantity(0.001234, 0.001) -> 0.001
              quantize_quantity(1.2345, 0.01) -> 1.23
     """
-    # Determine the number of decimal places from step_size
     step_size_str = str(step_size)
     if '.' in step_size_str:
         decimal_places = len(step_size_str.split('.')[1])
     else:
         decimal_places = 0
     
-    # Format the quantity to the determined decimal places and convert back to float
     return float(f'{quantity:.{decimal_places}f}')
 
 # --- Binance API Configuration ---
@@ -105,9 +104,9 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
         # Calculate quantity
         quantity = order_size_usd / current_price 
         
-        # Apply quantity precision - เรียกใช้ฟังก์ชันที่เราเพิ่มเข้ามา
-        quantity = quantize_quantity(quantity, step_size) # เปลี่ยนจาก client.quantize_quantity เป็น quantize_quantity
-
+        # Apply quantity precision
+        quantity = quantize_quantity(quantity, step_size) 
+        
         # Check minNotional
         if quantity * current_price < min_notional:
             print(f"Calculated quantity {quantity} * {current_price} is below minNotional {min_notional} for {symbol}. Cannot place order.")
@@ -116,30 +115,40 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
         print(f"Attempting to place {signal_type} order for {quantity} {symbol} at price {current_price} USD_value: {order_size_usd}")
 
         order = None
-        if signal_type == 'BUY':
-            order = client.futures_create_order(
-                symbol=symbol,
-                side=SIDE_BUY,
-                type=ORDER_TYPE_MARKET,
-                quantity=quantity
-            )
-        elif signal_type == 'SELL':
-            order = client.futures_create_order(
-                symbol=symbol,
-                side=SIDE_SELL,
-                type=ORDER_TYPE_MARKET,
-                quantity=quantity
-            )
+        try:
+            if signal_type == 'BUY':
+                order = client.futures_create_order(
+                    symbol=symbol,
+                    side=SIDE_BUY,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=quantity
+                )
+            elif signal_type == 'SELL':
+                order = client.futures_create_order(
+                    symbol=symbol,
+                    side=SIDE_SELL,
+                    type=ORDER_TYPE_MARKET,
+                    quantity=quantity
+                )
+        except BinanceAPIException as e:
+            print(f"Binance API Error placing order for {symbol}: Code={e.code}, Message={e.message}")
+            return False
+        except BinanceRequestException as e:
+            print(f"Binance Request Error placing order for {symbol}: Message={e}")
+            return False
+        except Exception as e:
+            print(f"General Error during order creation for {symbol}: {e}")
+            return False
         
         if order:
             print(f"Order placed successfully: {order}")
             return True
         else:
-            print("Order object is None.")
+            print("Order object is None, even after specific error handling. This is unexpected.")
             return False
 
-    except Exception as e:
-        print(f"Error placing order for {symbol}: {e}")
+    except Exception as e: # Catch any other errors that might occur before order creation
+        print(f"Error before order creation for {symbol}: {e}")
         return False
 
 # --- Webhook Endpoint ---
