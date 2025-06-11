@@ -4,10 +4,9 @@ import time
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
+from binance.exceptions import BinanceAPIException, BinanceRequestException # Import BinanceAPIException, BinanceRequestException
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
-# Import BinanceAPIException
-from binance.exceptions import BinanceAPIException, BinanceRequestException
 
 app = Flask(__name__)
 
@@ -36,6 +35,28 @@ if api_key and api_secret:
     try:
         client = Client(api_key, api_secret, testnet=True)
         print("Binance Futures Testnet client initialized successfully using testnet=True.")
+        
+        # --- เพิ่มส่วนนี้: ทดสอบการเชื่อมต่อ API Key ---
+        try:
+            # ลองเรียกข้อมูล Account Balance เพื่อทดสอบ API Key
+            test_balance = client.futures_account_balance()
+            print("Successfully connected to Binance Futures Testnet API with provided credentials. Balances:")
+            for asset in test_balance:
+                if float(asset['balance']) > 0:
+                    print(f"  {asset['asset']}: {asset['balance']} (Cross Wallet: {asset['crossWalletBalance']})")
+        except BinanceAPIException as e:
+            print(f"ERROR: Binance API Key Test Failed! Code: {e.code}, Message: {e.message}")
+            print("Please check your BINANCE_API_KEY and BINANCE_API_SECRET environment variables. Ensure they are for Testnet and correctly configured.")
+            client = None # ตั้ง client เป็น None เพื่อไม่ให้ทำงานต่อถ้า API Key มีปัญหา
+        except BinanceRequestException as e:
+            print(f"ERROR: Binance Request Test Failed! Message: {e}")
+            print("Please check your internet connection or API Key environment variables.")
+            client = None
+        except Exception as e:
+            print(f"ERROR: An unexpected error occurred during Binance API Key test: {e}")
+            client = None
+        # --- สิ้นสุดการเพิ่มส่วนทดสอบ ---
+
     except Exception as e:
         print(f"Error initializing Binance client: {e}")
         client = None
@@ -65,7 +86,7 @@ else:
 # --- Trading Logic ---
 def place_order(signal_type, symbol, price, order_size_usd, sl_price):
     if not client:
-        print(f"Binance client not initialized. Cannot place order for {symbol}.")
+        print(f"Binance client not initialized or failed API key test. Cannot place order for {symbol}.")
         return False
 
     try:
@@ -144,7 +165,7 @@ def place_order(signal_type, symbol, price, order_size_usd, sl_price):
             print(f"Order placed successfully: {order}")
             return True
         else:
-            print("Order object is None, even after specific error handling. This is unexpected.")
+            print("Order object is None, even after specific error handling. This is unexpected. This often indicates an issue with API Key permissions or account status that doesn't trigger a specific API exception during order placement.")
             return False
 
     except Exception as e: # Catch any other errors that might occur before order creation
