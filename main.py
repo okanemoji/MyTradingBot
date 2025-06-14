@@ -63,7 +63,7 @@ buyAlertMessage = "{ \"Type\": \"Signal\", \"SignalType\": \"buy\", \"Symbol\": 
 sellAlertMessage = "{ \"Type\": \"Signal\", \"SignalType\": \"sell\", \"Symbol\": \"{{ticker}}\", \"Price\": \"{{close}}\", \"OrderSizeUSD\": \"" + str.tostring(tradeSizeUSD) + "\", \"Leverage\": \"" + str.tostring(leverage) + "\", \"CalculatedQty\": \"" + str.tostring(calculatedQty) + "\", \"SLPrice\": \"" + str.tostring(storedSLPrice) + "\" }"
 
 // For close signals, we need to know the position direction and size being closed.
-// We'll pass `strategy.position_size` and `strategy.position_avg_price` as references.
+# We'll pass `strategy.position_size` and `strategy.position_avg_price` as references.
 closeAlertMessageLong = "{ \"Type\": \"Signal\", \"SignalType\": \"close\", \"Symbol\": \"{{ticker}}\", \"Price\": \"{{close}}\", \"PositionSize\": \"" + str.tostring(math.abs(strategy.position_size)) + "\", \"PositionDirection\": \"Long\", \"SLPrice\": \"" + str.tostring(storedSLPrice) + "\" }"
 closeAlertMessageShort = "{ \"Type\": \"Signal\", \"SignalType\": \"close\", \"Symbol\": \"{{ticker}}\", \"Price\": \"{{close}}\", \"PositionSize\": \"" + str.tostring(math.abs(strategy.position_size)) + "\", \"PositionDirection\": \"Short\", \"SLPrice\": \"" + str.tostring(storedSLPrice) + "\" }"
 
