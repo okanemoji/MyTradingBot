@@ -216,7 +216,7 @@ if strategy.position_size[1] != 0 and strategy.position_size == 0 // If position
 // Logic for plotting entry, SL
 bool newTradeOpened = (strategy.position_size != 0) and (nz(strategy.position_size[1], 0) == 0) 
 
-// If there's an open position (or a new trade just opened) 
+# If there's an open position (or a new trade just opened) 
 if strategy.position_size != 0 or newTradeOpened 
     if newTradeOpened 
         entryLabel := label.new(x=bar_index, y=storedEntryPrice, 
