@@ -1,238 +1,258 @@
-import os
-import json
-import time
-from flask import Flask, request, jsonify
-from binance.client import Client
-from binance.enums import *
-from binance.exceptions import BinanceAPIException, BinanceRequestException # Import BinanceAPIException, BinanceRequestException
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+//@version=5
+strategy("MACD Trend Following Strategy v2", overlay=true, initial_capital=2000, default_qty_value=100, default_qty_type=strategy.cash) 
 
-app = Flask(__name__)
+// --- Input Parameters ---
+emaLength = input.int(2000, "EMA Trend Filter Length", minval=1) 
+fastLength = input.int(12, "MACD Fast Length", minval=1) 
+slowLength = input.int(26, "MACD Slow Length", minval=1) 
+signalLength = input.int(9, "MACD Signal Length", minval=1) // Standard MACD signal length 
+macdThreshold = input.float(-140, "MACD Buy Entry Threshold", step=1) // Threshold for entry in buy direction 
+macdThresholdSell = input.float(140, "MACD Sell Entry Threshold", step=1) // Threshold for entry in sell direction 
 
-# --- Helper function for quantity quantization ---
-def quantize_quantity(quantity, step_size):
-    """
-    Quantizes a quantity to the correct number of decimal places based on the step_size.
-    Example: quantize_quantity(0.001234, 0.001) -> 0.001
-             quantize_quantity(1.2345, 0.01) -> 1.23
-    """
-    step_size_str = str(step_size)
-    if '.' in step_size_str:
-        decimal_places = len(step_size_str.split('.')[1])
-    else:
-        decimal_places = 0
+// TP/SL Thresholds for MACD
+macdTpHighThreshold = input.float(140, "MACD TP High Threshold (for Long)", step=1) // New: TP for Long when MACD peaks above this 
+macdTpLowThreshold = input.float(-140, "MACD TP Low Threshold (for Short)", step=1) // New: TP for Short when MACD troughs below this 
+
+slPoints = input.float(10000, "Stop Loss Points from Entry", minval=1, step=1) // กำหนด SL เป็นจำนวนจุด 
+macdThresholdLookback = input.int(5, "MACD Entry Threshold Lookback Bars", minval=1, maxval=50) 
+
+// --- Strategy Settings ---
+tradeSizeUSD = 100 // Ordersize in USD 
+leverage = 125 // Leverage 
+
+// --- Trend Filter (EMA 2000) ---
+ema2000 = ta.ema(close, emaLength) 
+plot(ema2000, "EMA 2000", color=color.rgb(128, 0, 128), linewidth=2) // เพิ่มการ plot EMA2000 
+
+// --- MACD Calculations ---
+[macdLine, signalLine, hist] = ta.macd(close, fastLength, slowLength, signalLength) 
+
+// Function to check if MACD Histogram is "red" (negative for buy) or "green" (positive for sell)
+isMacdHistRed() => hist < 0 
+isMacdHistGreen() => hist > 0 
+
+// --- Entry Conditions ---
+buyEntryThresholdReachedRecently = ta.barssince(macdLine <= macdThreshold) <= (macdThresholdLookback - 1) 
+buyCondition = close > ema2000 and ta.crossover(macdLine, signalLine) and buyEntryThresholdReachedRecently 
+
+sellEntryThresholdReachedRecently = ta.barssince(macdLine >= macdThresholdSell) <= (macdThresholdLookback - 1) 
+sellCondition = close < ema2000 and ta.crossunder(macdLine, signalLine) and sellEntryThresholdReachedRecently 
+
+// --- Entry Logic ---
+var label entryLabel = na 
+var label slLabel = na 
+
+var float storedEntryPrice = na 
+var int storedEntryBarIndex = na 
+var string storedTradeDirection = "" 
+var float storedSLPrice = na 
+
+var bool macdPeakForLongTP = false 
+var bool macdTroughForShortTP = false 
+
+// --- Alert Message (JSON Payload) ---
+// This JSON format provides all necessary data for the webhook listener
+// Using consistent naming with main.py: SignalType, OrderSizeUSD, SLPrice, CalculatedQty, PositionSize, PositionDirection
+// Note: position_size is positive for long, negative for short. We send absolute value and direction.
+
+// Calculate quantity here for alert, similar to how it would be done for entry
+float usdtPerContract = close
+float calculatedQty = (tradeSizeUSD * leverage) / usdtPerContract
+
+buyAlertMessage = "{ \"Type\": \"Signal\", \"SignalType\": \"buy\", \"Symbol\": \"{{ticker}}\", \"Price\": \"{{close}}\", \"OrderSizeUSD\": \"" + str.tostring(tradeSizeUSD) + "\", \"Leverage\": \"" + str.tostring(leverage) + "\", \"CalculatedQty\": \"" + str.tostring(calculatedQty) + "\", \"SLPrice\": \"" + str.tostring(storedSLPrice) + "\" }"
+sellAlertMessage = "{ \"Type\": \"Signal\", \"SignalType\": \"sell\", \"Symbol\": \"{{ticker}}\", \"Price\": \"{{close}}\", \"OrderSizeUSD\": \"" + str.tostring(tradeSizeUSD) + "\", \"Leverage\": \"" + str.tostring(leverage) + "\", \"CalculatedQty\": \"" + str.tostring(calculatedQty) + "\", \"SLPrice\": \"" + str.tostring(storedSLPrice) + "\" }"
+
+// For close signals, we need to know the position direction and size being closed.
+// We'll pass `strategy.position_size` and `strategy.position_avg_price` as references.
+closeAlertMessageLong = "{ \"Type\": \"Signal\", \"SignalType\": \"close\", \"Symbol\": \"{{ticker}}\", \"Price\": \"{{close}}\", \"PositionSize\": \"" + str.tostring(math.abs(strategy.position_size)) + "\", \"PositionDirection\": \"Long\", \"SLPrice\": \"" + str.tostring(storedSLPrice) + "\" }"
+closeAlertMessageShort = "{ \"Type\": \"Signal\", \"SignalType\": \"close\", \"Symbol\": \"{{ticker}}\", \"Price\": \"{{close}}\", \"PositionSize\": \"" + str.tostring(math.abs(strategy.position_size)) + "\", \"PositionDirection\": \"Short\", \"SLPrice\": \"" + str.tostring(storedSLPrice) + "\" }"
+
+
+if (buyCondition)
+    if strategy.position_size == 0 // Only enter if no open position
+        // float usdtPerContract = close // Already defined above for alert message
+        // float calculatedQty = (tradeSizeUSD * leverage) / usdtPerContract // Already defined above for alert message
+        
+        strategy.entry("Buy", strategy.long, qty=calculatedQty, comment="Buy Entry", alert_message=buyAlertMessage) 
+        
+        storedEntryPrice := close 
+        storedEntryBarIndex := bar_index 
+        storedTradeDirection := "Long" 
+        storedSLPrice := close - slPoints // SL for Long 
+        macdPeakForLongTP := false // Reset for new trade 
+        macdPeakForLongTP := macdLine >= macdTpHighThreshold // Check if already above threshold at entry 
+        macdTroughForShortTP := false // Not relevant for Long, but reset 
+
+if (sellCondition)
+    if strategy.position_size == 0 // Only enter if no open position
+        // float usdtPerContract = close // Already defined above for alert message
+        // float calculatedQty = (tradeSizeUSD * leverage) / usdtPerContract // Already defined above for alert message
+
+        strategy.entry("Sell", strategy.short, qty=calculatedQty, comment="Sell Entry", alert_message=sellAlertMessage) 
+        
+        storedEntryPrice := close 
+        storedEntryBarIndex := bar_index 
+        storedTradeDirection := "Short" 
+        storedSLPrice := close + slPoints // SL for Short 
+        macdPeakForLongTP := false // Not relevant for Short, but reset 
+        macdTroughForShortTP := false // Reset for new trade 
+        macdTroughForShortTP := macdLine <= macdTpLowThreshold // Check if already below threshold at entry 
+
+// --- Update MACD Peak/Trough tracking while position is open ---
+if strategy.position_size > 0 // In a long position 
+    if not macdPeakForLongTP and macdLine >= macdTpHighThreshold 
+        macdPeakForLongTP := true // Set to true once MACD fast line reaches the high threshold 
+else if strategy.position_size < 0 // In a short position 
+    if not macdTroughForShortTP and macdLine <= macdTpLowThreshold 
+        macdTroughForShortTP := true // Set to true once MACD fast line reaches the low threshold 
+
+
+// --- Stop Loss and Take Profit Logic ---
+
+// For Long Position
+if strategy.position_size > 0 // If in a long position 
+    slTriggeredByPrice = close <= storedSLPrice 
     
-    return float(f'{quantity:.{decimal_places}f}')
+    tpConditionLong = macdPeakForLongTP and ta.crossunder(macdLine, 0) and isMacdHistRed() 
 
-# --- Binance API Configuration ---
-# Get API keys from environment variables
-api_key = os.environ.get('BINANCE_API_KEY')
-api_secret = os.environ.get('BINANCE_API_SECRET')
+    // NEW EXIT CONDITION: Close Long if price closes below EMA2000 
+    emaExitLongCondition = close < ema2000 // Define the EMA exit condition for Long 
 
-client = None
-if api_key and api_secret:
-    try:
-        client = Client(api_key, api_secret, testnet=True)
-        print("Binance Futures Testnet client initialized successfully using testnet=True.")
+    if slTriggeredByPrice 
+        strategy.close("Buy", comment="SL - Price Hit", alert_message=closeAlertMessageLong) 
+        // Reset stored variables upon closing a trade 
+        storedEntryPrice := na 
+        storedEntryBarIndex := na 
+        storedTradeDirection := "" 
+        storedSLPrice := na 
+        macdPeakForLongTP := false 
+        macdTroughForShortTP := false // Ensure all flags are reset 
+    else if tpConditionLong
+        strategy.close("Buy", comment="TP - MACD Peak & Cross 0, Hist Red", alert_message=closeAlertMessageLong) 
+        // Reset stored variables upon closing a trade 
+        storedEntryPrice := na 
+        storedEntryBarIndex := na 
+        storedTradeDirection := "" 
+        storedSLPrice := na 
+        macdPeakForLongTP := false 
+        macdTroughForShortTP := false // Ensure all flags are reset 
+    else if emaExitLongCondition // <--- NEW EXIT CONDITION FOR LONG 
+        strategy.close("Buy", comment="Exit Long on EMA2000 Cross Down", alert_message=closeAlertMessageLong) 
+        // Reset stored variables upon closing a trade 
+        storedEntryPrice := na 
+        storedEntryBarIndex := na 
+        storedTradeDirection := "" 
+        storedSLPrice := na 
+        macdPeakForLongTP := false 
+        macdTroughForShortTP := false 
+
+
+// For Short Position
+if strategy.position_size < 0 // If in a short position 
+    slTriggeredByPrice = close >= storedSLPrice 
+
+    tpConditionShort = macdTroughForShortTP and ta.crossover(macdLine, 0) and isMacdHistGreen() 
+
+    // NEW EXIT CONDITION: Close Short if price closes above EMA2000 
+    emaExitShortCondition = close > ema2000 // Define the EMA exit condition for Short 
+
+    if slTriggeredByPrice 
+        strategy.close("Sell", comment="SL - Price Hit", alert_message=closeAlertMessageShort) 
+        // Reset stored variables upon closing a trade 
+        storedEntryPrice := na 
+        storedEntryBarIndex := na 
+        storedTradeDirection := "" 
+        storedSLPrice := na 
+        macdPeakForLongTP := false // Ensure all flags are reset 
+        macdTroughForShortTP := false 
+    else if tpConditionShort
+        strategy.close("Sell", comment="TP - MACD Trough & Cross 0, Hist Green", alert_message=closeAlertMessageShort) 
+        // Reset stored variables upon closing a trade 
+        storedEntryPrice := na 
+        storedEntryBarIndex := na 
+        storedTradeDirection := "" 
+        storedSLPrice := na 
+        macdPeakForLongTP := false 
+        macdTroughForShortTP := false 
+    else if emaExitShortCondition // <--- NEW EXIT CONDITION FOR SHORT 
+        strategy.close("Sell", comment="Exit Short on EMA2000 Cross Up", alert_message=closeAlertMessageShort) 
+        // Reset stored variables upon closing a trade 
+        storedEntryPrice := na 
+        storedEntryBarIndex := na 
+        storedTradeDirection := "" 
+        storedSLPrice := na 
+        macdPeakForLongTP := false 
+        macdTroughForShortTP := false 
+
+
+// --- Plotting and Labels ---
+plot(macdLine, "MACD Line", color=color.blue) 
+plot(signalLine, "Signal Line", color=color.orange) 
+plot(hist, "MACD Histogram", color=hist >= 0 ? color.new(color.green, 20) : color.new(color.red, 20), style=plot.style_columns) 
+hline(0, "MACD Zero Line", color=color.gray, linestyle=hline.style_dotted) 
+hline(macdThreshold, "MACD Buy Entry Thresh", color=color.purple, linestyle=hline.style_dotted) 
+hline(macdThresholdSell, "MACD Sell Entry Thresh", color=color.purple, linestyle=hline.style_dotted) 
+
+// New hline for TP thresholds
+hline(macdTpHighThreshold, "MACD TP High Thresh", color=color.blue, linestyle=hline.style_dotted, linewidth=1) 
+hline(macdTpLowThreshold, "MACD TP Low Thresh", color=color.red, linestyle=hline.style_dotted, linewidth=1) 
+
+
+// --- Labels for Entry, SL ---
+
+// Clear labels on strategy exit (for a cleaner backtest view)
+if strategy.position_size[1] != 0 and strategy.position_size == 0 // If position was closed on this bar 
+    if na(entryLabel) == false // Check if label was actually created 
+        label.delete(entryLabel) 
+    if na(slLabel) == false 
+        label.delete(slLabel) 
+    storedEntryPrice := na 
+    storedEntryBarIndex := na 
+    storedTradeDirection := "" 
+    storedSLPrice := na 
+    macdPeakForLongTP := false 
+    macdTroughForShortTP := false 
+
+// Logic for plotting entry, SL
+bool newTradeOpened = (strategy.position_size != 0) and (nz(strategy.position_size[1], 0) == 0) 
+
+// If there's an open position (or a new trade just opened) 
+if strategy.position_size != 0 or newTradeOpened 
+    if newTradeOpened 
+        entryLabel := label.new(x=bar_index, y=storedEntryPrice, 
+                             text="Entry: " + str.tostring(storedEntryPrice, "#.##") + "\n" + 
+                                   "Date: " + str.format_time(time[0], "dd MMM yy HH:mm") + "\n" + 
+                                   "Dir: " + storedTradeDirection, 
+                             xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_down, 
+                             color=storedTradeDirection == "Long" ? color.new(color.green, 20) : color.new(color.red, 20), 
+                             textcolor=color.white, size=size.small) 
         
-        # --- เพิ่มส่วนนี้: ทดสอบการเชื่อมต่อ API Key ---
-        try:
-            # ลองเรียกข้อมูล Account Balance เพื่อทดสอบ API Key
-            test_balance = client.futures_account_balance()
-            print("Successfully connected to Binance Futures Testnet API with provided credentials. Balances:")
-            for asset in test_balance:
-                if float(asset['balance']) > 0:
-                    print(f"  {asset['asset']}: {asset['balance']} (Cross Wallet: {asset['crossWalletBalance']})")
-        except BinanceAPIException as e:
-            print(f"ERROR: Binance API Key Test Failed! Code: {e.code}, Message: {e.message}")
-            print("Please check your BINANCE_API_KEY and BINANCE_API_SECRET environment variables. Ensure they are for Testnet and correctly configured.")
-            client = None # ตั้ง client เป็น None เพื่อไม่ให้ทำงานต่อถ้า API Key มีปัญหา
-        except BinanceRequestException as e:
-            print(f"ERROR: Binance Request Test Failed! Message: {e}")
-            print("Please check your internet connection or API Key environment variables.")
-            client = None
-        except Exception as e:
-            print(f"ERROR: An unexpected error occurred during Binance API Key test: {e}")
-            client = None
-        # --- สิ้นสุดการเพิ่มส่วนทดสอบ ---
+        slLabel := label.new(x=bar_index, y=storedSLPrice, 
+                             text="SL: " + str.tostring(storedSLPrice, "#.##"), 
+                             xloc=xloc.bar_index, yloc=yloc.price, style=label.style_label_left, 
+                             color=color.new(color.gray, 50), textcolor=color.white, size=size.small) 
+    
+    if na(entryLabel) == false and strategy.position_size != 0 
+        label.set_x(entryLabel, bar_index) 
+        label.set_y(entryLabel, strategy.position_avg_price) 
 
-    except Exception as e:
-        print(f"Error initializing Binance client: {e}")
-        client = None
-else:
-    print("Binance API keys not found in environment variables. Trading functions will be disabled.")
+        label.set_x(slLabel, bar_index) 
+        label.set_y(slLabel, storedSLPrice) 
 
-# --- Google Sheet Configuration ---
-google_sheet_initialized = False
-sheet = None
+        float currentPositionEntryPrice = strategy.position_avg_price 
+        float currentPrice = close 
+        float pnl = (currentPrice - currentPositionEntryPrice) * strategy.position_size 
+        string pnlText = "PnL: " + str.tostring(pnl, "#.##") + " USD" 
 
-if os.environ.get('GOOGLE_SHEET_CREDENTIALS'):
-    try:
-        creds_json_str = os.environ.get('GOOGLE_SHEET_CREDENTIALS')
-        creds_json = json.loads(creds_json_str)
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_json, scope)
-        gc = gspread.authorize(creds)
-        sheet = gc.open("TradingBot_Signals").sheet1 # Replace "Binance Trading Bot Log" with your actual Google Sheet name
-        google_sheet_initialized = True
-        print("Google Sheet initialized successfully.")
-    except Exception as e:
-        print(f"Error initializing Google Sheet: {e}")
-        google_sheet_initialized = False
-else:
-    print("Google Sheet credentials not found in environment variables. Logging to Google Sheet will be disabled.")
+        label.set_text(entryLabel, 
+             "Entry: " + str.tostring(currentPositionEntryPrice, "#.##") + "\n" + 
+             "Date: " + str.format_time(time[0], "dd MMM yy HH:mm") + "\n" + 
+             "Dir: " + storedTradeDirection + "\n" + 
+             pnlText) 
+        label.set_color(entryLabel, pnl >= 0 ? color.new(color.green, 20) : color.new(color.red, 20)) 
 
-# --- Trading Logic ---
-def place_order(signal_type, symbol, price, order_size_usd, sl_price):
-    if not client:
-        print(f"Binance client not initialized or failed API key test. Cannot place order for {symbol}.")
-        return False
+var float equitySeries = 0.0 
+var float netProfitSeries = 0.0 
 
-    try:
-        ticker = client.futures_mark_price(symbol=symbol)
-        current_price = float(ticker['markPrice'])
-        
-        exchange_info = client.futures_exchange_info()
-        symbol_info = next((item for item in exchange_info['symbols'] if item['symbol'] == symbol), None)
-        
-        if not symbol_info:
-            print(f"Error: Symbol {symbol} not found in Futures exchange info.")
-            return False
-
-        min_notional_value = None
-        step_size_value = None
-        
-        for f in symbol_info['filters']:
-            if f['filterType'] == 'MIN_NOTIONAL':
-                if 'notional' in f: 
-                    min_notional_value = float(f['notional']) 
-            elif f['filterType'] == 'MARKET_LOT_SIZE':
-                if 'stepSize' in f:
-                    step_size_value = float(f['stepSize'])
-            elif f['filterType'] == 'LOT_SIZE':
-                if 'stepSize' in f:
-                    step_size_value = float(f['stepSize'])
-        
-        if min_notional_value is None or step_size_value is None:
-            print(f"Error: Could not find all required filters (MIN_NOTIONAL and MARKET_LOT_SIZE/LOT_SIZE) with valid values for {symbol}.")
-            print(f"Available filters for {symbol}: {symbol_info['filters']}")
-            return False
-
-        min_notional = min_notional_value
-        step_size = step_size_value
-
-        # Calculate quantity
-        quantity = order_size_usd / current_price 
-        
-        # Apply quantity precision
-        quantity = quantize_quantity(quantity, step_size) 
-        
-        # Check minNotional
-        if quantity * current_price < min_notional:
-            print(f"Calculated quantity {quantity} * {current_price} is below minNotional {min_notional} for {symbol}. Cannot place order.")
-            return False
-
-        print(f"Attempting to place {signal_type} order for {quantity} {symbol} at price {current_price} USD_value: {order_size_usd}")
-
-        order = None
-        try:
-            if signal_type == 'BUY':
-                order = client.futures_create_order(
-                    symbol=symbol,
-                    side=SIDE_BUY,
-                    type=ORDER_TYPE_MARKET,
-                    quantity=quantity
-                )
-            elif signal_type == 'SELL':
-                order = client.futures_create_order(
-                    symbol=symbol,
-                    side=SIDE_SELL,
-                    type=ORDER_TYPE_MARKET,
-                    quantity=quantity
-                )
-        except BinanceAPIException as e:
-            print(f"Binance API Error placing order for {symbol}: Code={e.code}, Message={e.message}")
-            return False
-        except BinanceRequestException as e:
-            print(f"Binance Request Error placing order for {symbol}: Message={e}")
-            return False
-        except Exception as e:
-            print(f"General Error during order creation for {symbol}: {e}")
-            return False
-        
-        if order:
-            print(f"Order placed successfully: {order}")
-            return True
-        else:
-            print("Order object is None, even after specific error handling. This is unexpected. This often indicates an issue with API Key permissions or account status that doesn't trigger a specific API exception during order placement.")
-            return False
-
-    except Exception as e: # Catch any other errors that might occur before order creation
-        print(f"Error before order creation for {symbol}: {e}")
-        return False
-
-# --- Webhook Endpoint ---
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    if request.method == 'POST':
-        try:
-            data = request.get_json()
-            if data is None:
-                print("Received empty or non-JSON webhook data.")
-                return jsonify({"status": "error", "message": "Invalid JSON payload"}), 400
-
-            print(f"Received webhook data: {data}")
-
-            # --- IMPORTANT: Check for ping signal FIRST ---
-            if data.get('type') == 'ping':
-                timestamp_ping = data.get('timestamp', time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()))
-                print(f"Received Keep-alive ping from TradingView at {timestamp_ping}.")
-                return jsonify({"status": "pong", "message": "Keep-alive ping received"}), 200
-            # --- END Ping Check ---
-
-            # If it's not a ping, process as a trading signal
-            signal_type = data.get('Signal Type')
-            symbol = data.get('Symbol')
-            price = float(data.get('Price')) if data.get('Price') else 0
-            order_size_usd = float(data.get('Order Size USD')) if data.get('Order Size USD') else 0
-            sl_price = float(data.get('SL Price')) if data.get('SL Price') else 0
-            timestamp = data.get('Timestamp', time.strftime('%Y-%m-%d %H:%M:%S UTC', time.gmtime()))
-
-            if not all([signal_type, symbol, order_size_usd > 0]):
-                print(f"Error: Missing essential data for trading signal. Received: {data}")
-                return jsonify({"status": "error", "message": "Missing essential data for trading signal."}), 400
-
-            if google_sheet_initialized:
-                try:
-                    sheet.append_row([timestamp, signal_type, symbol, price, order_size_usd, sl_price, json.dumps(data)])
-                    print(f"Signal logged to Google Sheet: {signal_type} {symbol}")
-                except Exception as e:
-                    print(f"Error logging to Google Sheet: {e}")
-            else:
-                print("Google Sheet not initialized, skipping log.")
-
-            order_success = place_order(signal_type, symbol, price, order_size_usd, sl_price)
-            if order_success:
-                return jsonify({"status": "success", "message": "Signal processed and order placed"}), 200
-            else:
-                return jsonify({"status": "error", "message": "Failed to place order"}), 500
-
-        except json.JSONDecodeError:
-            print("Received non-JSON data or malformed JSON.")
-            return jsonify({"status": "error", "message": "Invalid JSON format"}), 400
-        except Exception as e:
-            print(f"Unhandled error processing webhook: {e}")
-            return jsonify({"status": "error", "message": f"Internal server error: {e}"}), 500
-    return jsonify({"status": "error", "message": "Method Not Allowed"}), 405
-
-# --- Health Check Endpoint (Optional but Recommended for Render) ---
-@app.route('/', methods=['GET'])
-def health_check():
-    return "Flask app is running!", 200
-
-# --- Main entry point for Flask ---
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
-    print("Flask app is starting...")
+equitySeries := strategy.equity 
+netProfitSeries := strategy.netprofit
