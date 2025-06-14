@@ -1,4 +1,4 @@
-//@version=5
+
 strategy("MACD Trend Following Strategy v2", overlay=true, initial_capital=2000, default_qty_value=100, default_qty_type=strategy.cash) 
 
 // --- Input Parameters ---
