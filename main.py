@@ -1,3 +1,4 @@
+
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
@@ -23,6 +24,11 @@ def home():
 def webhook():
     data = request.json
     print(f"Received Webhook: {data}")
+
+    # ✅ Handle keep-alive ping
+    if data.get("type") == "ping":
+        print("🔵 Keep-alive ping received.")
+        return jsonify({"status": "ok", "message": "Ping received"}), 200
 
     signal = data.get("signal")
     leverage = data.get("leverage", 125)
