@@ -1,4 +1,3 @@
-
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
@@ -34,6 +33,8 @@ def webhook():
     leverage = data.get("leverage", 125)
     amount = data.get("amount", 100)
 
+    print(f"🟢 Signal received: {signal} | Leverage: {leverage} | Amount: {amount}")
+
     try:
         # Set leverage
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
@@ -44,7 +45,7 @@ def webhook():
         quantity = round((amount * leverage) / mark_price, 3)  # adjust precision
 
         if signal == "buy":
-            close_position("SELL")  # close any short
+            close_position("SELL")
             order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_BUY,
@@ -53,7 +54,7 @@ def webhook():
             )
             print(f"✅ Buy Order Placed: {order}")
         elif signal == "sell":
-            close_position("BUY")  # close any long
+            close_position("BUY")
             order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_SELL,
@@ -64,7 +65,7 @@ def webhook():
         elif signal == "close":
             close_position("BUY")
             close_position("SELL")
-            print(f"✅ Closed All Positions")
+            print("✅ Closed All Positions")
         else:
             print("❌ Unknown signal received.")
             return jsonify({"status": "error", "message": "Invalid signal"}), 400
