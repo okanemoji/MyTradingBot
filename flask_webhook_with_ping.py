@@ -10,7 +10,6 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 client = Client(API_KEY, API_SECRET)
-client.API_URL = 'https://testnet.binancefuture.com/fapi'
 
 symbol = "BTCUSDT"
 
