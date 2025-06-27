@@ -6,14 +6,12 @@ import json
 
 app = Flask(__name__)
 
-# === Binance Testnet Credentials ===
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 client = Client(API_KEY, API_SECRET)
 client.API_URL = 'https://testnet.binancefuture.com/fapi'
 
-# === Global Settings ===
 symbol = "BTCUSDT"
 
 @app.route("/", methods=["GET"])
@@ -23,31 +21,38 @@ def home():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        # ✅ รองรับทั้ง JSON (application/json) และ Text (text/plain)
+        # Check Content-Type
         if request.is_json:
             data = request.get_json()
         else:
-            raw_data = request.data.decode("utf-8")
+            raw_data = request.data.decode("utf-8").strip()
+            if raw_data == "":
+                return jsonify({"status": "error", "message": "Empty body"}), 400
             data = json.loads(raw_data)
 
         print(f"Received Webhook: {data}")
 
-        # ✅ Ping handler
         if data.get("type") == "ping":
             print("🔵 Keep-alive ping received.")
             return jsonify({"status": "ok", "message": "Ping received"}), 200
 
-        # ✅ Main signal handling
         signal = data.get("signal")
         leverage = data.get("leverage", 125)
         amount = data.get("amount", 100)
 
         print(f"🟢 Signal: {signal} | Leverage: {leverage} | Amount: {amount}")
 
+        # Validate API Credentials before making requests
+        try:
+            client.futures_account()
+        except Exception as e:
+            print(f"❌ Binance API validation failed: {str(e)}")
+            return jsonify({"status": "error", "message": "Binance API Key invalid or no permissions."}), 500
+
         # Set leverage
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
-        # Get current price
+        # Get price
         mark_price_data = client.futures_mark_price(symbol=symbol)
         mark_price = float(mark_price_data["markPrice"])
         quantity = round((amount * leverage) / mark_price, 3)
@@ -80,14 +85,17 @@ def webhook():
 
         return jsonify({"status": "success", "message": f"Executed {signal}"}), 200
 
+    except json.JSONDecodeError:
+        print("❌ Error: Invalid JSON body.")
+        return jsonify({"status": "error", "message": "Invalid JSON"}), 400
     except Exception as e:
         print(f"❌ Error: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 def close_position(side_to_close):
     try:
-        pos = client.futures_position_information(symbol=symbol)
-        for p in pos:
+        positions = client.futures_position_information(symbol=symbol)
+        for p in positions:
             amt = float(p['positionAmt'])
             if amt != 0:
                 side = SIDE_BUY if amt < 0 else SIDE_SELL
