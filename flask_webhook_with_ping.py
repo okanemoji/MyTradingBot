@@ -5,32 +5,32 @@ import os
 
 app = Flask(__name__)
 
-# === Binance API Key (Production or Testnet) ===
+# === Binance Credentials (Production) ===
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 client = Client(API_KEY, API_SECRET)
-# ถ้าใช้ Testnet ให้ uncomment บรรทัดนี้
-# client.API_URL = 'https://testnet.binancefuture.com/fapi'
 
+# === Global Settings ===
 symbol = "BTCUSDT"
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Binance Futures Webhook Bot Running!"
+    return "Binance Webhook Bot Running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
     print(f"Received Webhook: {data}")
 
+    # ✅ Handle ping
     if data.get("type") == "ping":
         print("🔵 Keep-alive ping received.")
         return jsonify({"status": "ok", "message": "Ping received"}), 200
 
     signal = data.get("signal")
-    leverage = data.get("leverage", 125)
-    amount = data.get("amount", 100)
+    leverage = int(data.get("leverage", 125))
+    amount = float(data.get("amount", 100))
 
     try:
         # Set leverage
@@ -39,31 +39,39 @@ def webhook():
         # Get mark price
         mark_price_data = client.futures_mark_price(symbol=symbol)
         mark_price = float(mark_price_data["markPrice"])
-        quantity = round((amount * leverage) / mark_price, 6)
+
+        # Calculate quantity
+        raw_qty = (amount * leverage) / mark_price
+
+        # Round to step size 0.001
+        quantity = max(round(raw_qty / 0.001) * 0.001, 0.001)
+
+        print(f"Calculated quantity: {quantity}")
 
         if signal == "buy":
-            close_all_positions()
+            close_position("SELL")
             order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_BUY,
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
-            print(f"✅ Buy Order Placed: {order}")
+            print(f"✅ Buy order placed: {order}")
 
         elif signal == "sell":
-            close_all_positions()
+            close_position("BUY")
             order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_SELL,
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
-            print(f"✅ Sell Order Placed: {order}")
+            print(f"✅ Sell order placed: {order}")
 
         elif signal == "close":
-            close_all_positions()
-            print("✅ All positions closed.")
+            close_position("BUY")
+            close_position("SELL")
+            print("✅ Closed all positions")
 
         else:
             print("❌ Unknown signal received.")
@@ -76,30 +84,26 @@ def webhook():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-def close_all_positions():
+def close_position(side_to_close):
     try:
         positions = client.futures_position_information(symbol=symbol)
-        for pos in positions:
-            amt = float(pos['positionAmt'])
-            if amt == 0:
-                continue  # ไม่มี Position ข้าม
-
-            side = SIDE_BUY if amt < 0 else SIDE_SELL
-            qty = abs(amt)
-
-            # ไม่ต้องส่ง positionSide, ไม่ต้องส่ง reduceOnly
-            # Binance จะถือว่าเป็นการปิดฝั่งตรงข้ามอัตโนมัติ
-            client.futures_create_order(
-                symbol=symbol,
-                side=side,
-                type=ORDER_TYPE_MARKET,
-                quantity=round(qty, 6)
-            )
-            print(f"🔁 Closed position ({side}) qty {qty}")
-
+        for p in positions:
+            amt = float(p["positionAmt"])
+            if amt != 0:
+                side = SIDE_BUY if amt < 0 else SIDE_SELL
+                if side == side_to_close:
+                    qty = abs(amt)
+                    qty = max(round(qty / 0.001) * 0.001, 0.001)  # Ensure step size
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side=side,
+                        type=ORDER_TYPE_MARKET,
+                        quantity=qty,
+                        reduceOnly=True
+                    )
+                    print(f"🔁 Closed {side} position qty {qty}")
     except Exception as e:
         print(f"⚠️ Error closing positions: {str(e)}")
-
 
 
 if __name__ == "__main__":
