@@ -82,24 +82,24 @@ def close_all_positions():
         for pos in positions:
             amt = float(pos['positionAmt'])
             if amt == 0:
-                continue  # ไม่มีโพสิชั่น ข้าม
+                continue  # ไม่มี Position ข้าม
 
             side = SIDE_BUY if amt < 0 else SIDE_SELL
-            pos_side = pos['positionSide']
             qty = abs(amt)
 
+            # ไม่ต้องส่ง positionSide, ไม่ต้องส่ง reduceOnly
+            # Binance จะถือว่าเป็นการปิดฝั่งตรงข้ามอัตโนมัติ
             client.futures_create_order(
                 symbol=symbol,
                 side=side,
-                positionSide=pos_side,
                 type=ORDER_TYPE_MARKET,
-                quantity=round(qty, 6),
-                reduceOnly=True
+                quantity=round(qty, 6)
             )
-            print(f"🔁 Closed {pos_side} ({side}) position qty {qty}")
+            print(f"🔁 Closed position ({side}) qty {qty}")
 
     except Exception as e:
         print(f"⚠️ Error closing positions: {str(e)}")
+
 
 
 if __name__ == "__main__":
