@@ -11,10 +11,8 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 client = Client(API_KEY, API_SECRET)
 
-# * ถ้าเป็น TESTNET *
-# client.API_URL = 'https://testnet.binancefuture.com/fapi'
+# client.API_URL = 'https://testnet.binancefuture.com/fapi'  # Uncomment if using testnet
 
-# === Global Settings ===
 symbol = "BTCUSDT"
 
 @app.route("/", methods=["GET"])
@@ -26,7 +24,6 @@ def webhook():
     data = request.json
     print(f"Received Webhook: {data}")
 
-    # ✅ Keep-alive Ping
     if data.get("type") == "ping":
         print("🔵 Keep-alive ping received.")
         return jsonify({"status": "ok", "message": "Ping received"}), 200
@@ -36,10 +33,8 @@ def webhook():
     amount = data.get("amount", 100)
 
     try:
-        # Set Leverage
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
-        # Get Mark Price
         mark_price_data = client.futures_mark_price(symbol=symbol)
         mark_price = float(mark_price_data["markPrice"])
         quantity = round((amount * leverage) / mark_price, 6)
@@ -49,6 +44,7 @@ def webhook():
             order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_BUY,
+                positionSide="LONG",
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
@@ -59,6 +55,7 @@ def webhook():
             order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_SELL,
+                positionSide="SHORT",
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
@@ -78,7 +75,6 @@ def webhook():
         print(f"❌ Error executing order: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
-# === Close all positions safely ===
 def close_all_positions():
     try:
         positions = client.futures_position_information(symbol=symbol)
@@ -88,17 +84,18 @@ def close_all_positions():
                 continue
 
             side = SIDE_BUY if amt < 0 else SIDE_SELL
-            qty_to_close = abs(amt)
+            pos_side = pos['positionSide']  # LONG or SHORT
+            qty = abs(amt)
 
-            # Note: For Hedge Mode you must specify positionSide
             client.futures_create_order(
                 symbol=symbol,
                 side=side,
+                positionSide=pos_side,
                 type=ORDER_TYPE_MARKET,
-                quantity=round(qty_to_close, 6),
+                quantity=round(qty, 6),
                 reduceOnly=True
             )
-            print(f"🔁 Closed {side} position of size {qty_to_close}")
+            print(f"🔁 Closed {pos_side} ({side}) position qty {qty}")
     except Exception as e:
         print(f"⚠️ Error closing positions: {str(e)}")
 
