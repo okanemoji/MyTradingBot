@@ -5,19 +5,19 @@ import os
 
 app = Flask(__name__)
 
-# === Binance Credentials ===
+# === Binance API Key (Production or Testnet) ===
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 client = Client(API_KEY, API_SECRET)
-
-# client.API_URL = 'https://testnet.binancefuture.com/fapi'  # Uncomment if using testnet
+# ถ้าใช้ Testnet ให้ uncomment บรรทัดนี้
+# client.API_URL = 'https://testnet.binancefuture.com/fapi'
 
 symbol = "BTCUSDT"
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Binance Webhook Bot Running!"
+    return "Binance Futures Webhook Bot Running!"
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -33,8 +33,10 @@ def webhook():
     amount = data.get("amount", 100)
 
     try:
+        # Set leverage
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
+        # Get mark price
         mark_price_data = client.futures_mark_price(symbol=symbol)
         mark_price = float(mark_price_data["markPrice"])
         quantity = round((amount * leverage) / mark_price, 6)
@@ -44,7 +46,6 @@ def webhook():
             order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_BUY,
-                positionSide="LONG",
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
@@ -55,7 +56,6 @@ def webhook():
             order = client.futures_create_order(
                 symbol=symbol,
                 side=SIDE_SELL,
-                positionSide="SHORT",
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
@@ -72,8 +72,9 @@ def webhook():
         return jsonify({"status": "success", "message": f"Executed {signal}"}), 200
 
     except Exception as e:
-        print(f"❌ Error executing order: {str(e)}")
+        print(f"❌ Error: {str(e)}")
         return jsonify({"status": "error", "message": str(e)}), 500
+
 
 def close_all_positions():
     try:
@@ -81,10 +82,10 @@ def close_all_positions():
         for pos in positions:
             amt = float(pos['positionAmt'])
             if amt == 0:
-                continue
+                continue  # ไม่มีโพสิชั่น ข้าม
 
             side = SIDE_BUY if amt < 0 else SIDE_SELL
-            pos_side = pos['positionSide']  # LONG or SHORT
+            pos_side = pos['positionSide']
             qty = abs(amt)
 
             client.futures_create_order(
@@ -96,8 +97,10 @@ def close_all_positions():
                 reduceOnly=True
             )
             print(f"🔁 Closed {pos_side} ({side}) position qty {qty}")
+
     except Exception as e:
         print(f"⚠️ Error closing positions: {str(e)}")
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=80)
