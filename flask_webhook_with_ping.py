@@ -1,129 +1,126 @@
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
-import os
-from math import floor
+import os, time
 
 app = Flask(__name__)
 
-API_KEY = os.getenv("BINANCE_API_KEY", "your_api_key")
-API_SECRET = os.getenv("BINANCE_API_SECRET", "your_api_secret")
+# โหลด API key จาก environment variable
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+
 client = Client(API_KEY, API_SECRET)
 
-def get_is_hedge_mode():
-    """Return True if Hedge mode (dualSidePosition), else False."""
-    mode = client.futures_get_position_mode()  # e.g. {'dualSidePosition': True} OR {'dualSidePosition': 'false'}
-    raw = mode.get("dualSidePosition")
-    return str(raw).lower() == "true" if not isinstance(raw, bool) else raw
-
-def get_step_size(symbol):
-    ex_info = client.futures_exchange_info()
-    sym_info = next(s for s in ex_info["symbols"] if s["symbol"] == symbol)
-    for f in sym_info["filters"]:
-        if f["filterType"] == "LOT_SIZE":
-            return float(f["stepSize"])
-    return 0.0
-
-def round_step(qty, step):
-    if step <= 0:
-        return float(qty)
-    return float(f"{(floor(qty / step) * step):.10f}")
-
-def calc_qty_from_usd(symbol, amount_usd, leverage):
-    mark_price = float(client.futures_mark_price(symbol=symbol)["markPrice"])
-    qty = (float(amount_usd) * int(leverage)) / mark_price
-    step = get_step_size(symbol)
-    return round_step(qty, step)
-
-def read_live_position_qty(symbol, is_hedge):
-    """Return (long_qty, short_qty) as positive numbers (0 if none)."""
-    pos_info = client.futures_position_information(symbol=symbol)
-    long_amt = 0.0
-    short_amt = 0.0
-    if is_hedge:
-        for p in pos_info:
-            side = p.get("positionSide")
-            amt = float(p.get("positionAmt", "0"))
-            if side == "LONG":
-                long_amt = max(amt, 0.0)
-            elif side == "SHORT":
-                short_amt = max(abs(amt), 0.0)
-    else:
-        amt = float(pos_info[0].get("positionAmt", "0"))
-        if amt > 0:
-            long_amt = amt
-        elif amt < 0:
-            short_amt = abs(amt)
-    return long_amt, short_amt
+# ตรวจสอบ Hedge Mode
+def is_hedge_mode():
+    try:
+        res = client.futures_get_position_mode()
+        return res["dualSidePosition"]
+    except Exception as e:
+        print(f"❌ Error checking hedge mode: {e}")
+        return False
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True, silent=True)
+    data = request.get_json(force=True)
     print(f"Received Webhook: {data}")
-    if not data or "signal" not in data:
-        return jsonify({"status": "error", "message": "No signal"}), 400
 
-    signal = str(data["signal"]).lower()
-    symbol = str(data.get("symbol", "BTCUSDT")).upper()
+    if not data or "signal" not in data:
+        return jsonify({"error": "Invalid webhook"}), 400
+
+    signal = data["signal"]
+    symbol = data.get("symbol", "BTCUSDT")
+    amount = float(data.get("amount", 0))
     leverage = int(data.get("leverage", 125))
-    amount_usd = float(data.get("amount", 100))
+    side = data.get("side", "").upper()
+
+    hedge = is_hedge_mode()
+    print(f"ℹ️ HedgeMode={hedge} | symbol={symbol}")
 
     try:
-        # === READ MODE ===
-        is_hedge = get_is_hedge_mode()
-        print(f"ℹ️ HedgeMode={is_hedge} | symbol={symbol}")
+        # ตั้ง leverage
+        try:
+            client.futures_change_leverage(symbol=symbol, leverage=leverage)
+        except Exception as e:
+            print(f"⚠️ Could not change leverage: {e}")
 
-        # === CLOSE ===
-        if signal == "close":
-            side = str(data.get("side", "BUY")).upper()  # BUY = close long, SELL = close short
-            desired = calc_qty_from_usd(symbol, amount_usd, leverage)
-            long_qty, short_qty = read_live_position_qty(symbol, is_hedge)
+        # แปลง USDT → contracts
+        last_price = float(client.futures_symbol_ticker(symbol=symbol)["price"])
+        qty = round((amount * leverage) / last_price, 3)  # ปัด 3 ทศนิยมพอ
 
-            if side == "BUY":   # Close LONG
-                live = long_qty
-                close_side = SIDE_SELL
-                pos_side = "LONG"
-            else:               # Close SHORT
-                live = short_qty
-                close_side = SIDE_BUY
-                pos_side = "SHORT"
+        if signal == "buy":
+            order = client.futures_create_order(
+                symbol=symbol,
+                side=SIDE_BUY,
+                type=ORDER_TYPE_MARKET,
+                quantity=qty,
+                positionSide="LONG" if hedge else None
+            )
+            print(f"✅ Buy order: {order}")
 
-            qty_to_close = min(live, desired)
-            qty_to_close = round_step(qty_to_close, get_step_size(symbol))
+        elif signal == "sell":
+            order = client.futures_create_order(
+                symbol=symbol,
+                side=SIDE_SELL,
+                type=ORDER_TYPE_MARKET,
+                quantity=qty,
+                positionSide="SHORT" if hedge else None
+            )
+            print(f"✅ Sell order: {order}")
 
-            # DEBUG log
-            print(f"[DEBUG] Request close side={side}, live_long={long_qty}, live_short={short_qty}, "
-                  f"desired={desired}, final_qty={qty_to_close}, pos_side={pos_side}")
+        elif signal == "close":
+            # ดึงสถานะปัจจุบัน
+            positions = client.futures_position_information(symbol=symbol)
+            long_amt = short_amt = 0.0
+            for p in positions:
+                if p["positionSide"] == "LONG":
+                    long_amt = float(p["positionAmt"])
+                elif p["positionSide"] == "SHORT":
+                    short_amt = float(p["positionAmt"])
 
-            if qty_to_close <= 0:
-                return jsonify({"status": "noop", "message": "Nothing to close"}), 200
+            desired = (amount * leverage) / last_price
+            final_qty = min(abs(long_amt if side == "BUY" else short_amt), desired)
 
-            if is_hedge:
+            pos_side = "LONG" if side == "BUY" else "SHORT"
+            close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
+
+            print(f"[DEBUG] Request close side={side}, live_long={long_amt}, live_short={short_amt}, desired={desired}, final_qty={final_qty}, pos_side={pos_side}")
+
+            if hedge:
+                # Hedge mode: ไม่ต้องใส่ reduceOnly
                 order = client.futures_create_order(
                     symbol=symbol,
                     side=close_side,
                     type=ORDER_TYPE_MARKET,
-                    quantity=qty_to_close,
-                    positionSide=pos_side,
-                    reduceOnly=True
+                    quantity=final_qty,
+                    positionSide=pos_side
                 )
             else:
+                # One-way mode: ต้องใช้ reduceOnly
                 order = client.futures_create_order(
                     symbol=symbol,
                     side=close_side,
                     type=ORDER_TYPE_MARKET,
-                    quantity=qty_to_close
+                    quantity=final_qty,
+                    reduceOnly=True
                 )
 
-            print(f"✅ Close {symbol}: side={side}, qty={qty_to_close}, mode={'HEDGE' if is_hedge else 'ONE-WAY'}")
-            return jsonify({"status": "success", "orderId": order.get('orderId'), "qty": qty_to_close}), 200
+            print(f"✅ Close order: {order}")
 
         else:
-            return jsonify({"status": "error", "message": "Unknown signal"}), 400
+            return jsonify({"error": "Unknown signal"}), 400
 
     except Exception as e:
         print(f"❌ Error executing order: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        return jsonify({"error": str(e)}), 500
+
+    return jsonify({"status": "success"}), 200
+
+
+@app.route("/ping", methods=["GET"])
+def ping():
+    return jsonify({"status": "ok", "time": int(time.time())})
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
