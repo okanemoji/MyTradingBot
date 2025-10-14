@@ -3,6 +3,7 @@ from binance.client import Client
 from binance.enums import *
 import os
 from math import floor
+from time import time
 
 app = Flask(__name__)
 
@@ -10,34 +11,55 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 client = Client(API_KEY, API_SECRET)
 
+# ---------- Cache ----------
+_cached_exchange_info = None
+_cached_exchange_time = 0
+_CACHE_TTL = 3600  # 1 ชั่วโมง (3600 วินาที)
+
 # ---------- Helpers ----------
 def get_position_mode_is_hedge() -> bool:
-    """True = Hedge mode, False = One-way. Robust to bool/str."""
+    """True = Hedge mode, False = One-way."""
     try:
-        res = client.futures_get_position_mode()  # {'dualSidePosition': True/False or 'true'/'false'}
+        res = client.futures_get_position_mode()
         raw = res.get("dualSidePosition")
         return raw if isinstance(raw, bool) else str(raw).lower() == "true"
     except Exception as e:
         print(f"⚠️ Cannot read position mode, assume ONE-WAY. err={e}")
         return False
 
+
 def get_symbol_step_size(symbol: str) -> float:
-    """LOT_SIZE step for qty rounding."""
-    info = client.futures_exchange_info()
+    """LOT_SIZE step for qty rounding (cached 1hr)."""
+    global _cached_exchange_info, _cached_exchange_time
+    now = time()
+    if not _cached_exchange_info or (now - _cached_exchange_time) > _CACHE_TTL:
+        try:
+            _cached_exchange_info = client.futures_exchange_info()
+            _cached_exchange_time = now
+            print("🔄 Refreshed exchange_info from Binance")
+        except Exception as e:
+            print(f"⚠️ Failed to refresh exchange_info: {e}")
+            if not _cached_exchange_info:
+                raise e  # ไม่มี cache เก่า → error เลย
+
+    info = _cached_exchange_info
     sym = next(s for s in info["symbols"] if s["symbol"] == symbol)
     for f in sym["filters"]:
         if f["filterType"] == "LOT_SIZE":
             return float(f["stepSize"])
     return 0.0
 
+
 def floor_to_step(qty: float, step: float) -> float:
     if step <= 0:
         return float(qty)
     return float(f"{(floor(qty / step) * step):.10f}")
 
+
 def usdt_to_contracts(symbol: str, amount_usd: float, leverage: int, price: float, step: float) -> float:
     raw = (float(amount_usd) * int(leverage)) / float(price)
     return floor_to_step(raw, step)
+
 
 def read_live_qtys(symbol: str, is_hedge: bool) -> tuple[float, float]:
     """Return (long_qty, short_qty) as positive numbers (0 if none)."""
@@ -59,6 +81,7 @@ def read_live_qtys(symbol: str, is_hedge: bool) -> tuple[float, float]:
         elif amt < 0:
             short_q = abs(amt)
     return long_q, short_q
+
 
 # ---------- Routes ----------
 @app.route("/webhook", methods=["POST"])
