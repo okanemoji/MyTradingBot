@@ -40,10 +40,7 @@ def usdt_to_contracts(symbol: str, amount_usd: float, leverage: int, price: floa
     return floor_to_step(raw, step)
 
 def read_live_qtys(symbol: str, is_hedge: bool) -> tuple[float, float]:
-    """
-    Return (long_qty, short_qty) as positive numbers (0 if none).
-    For hedge: read by positionSide. For one-way: split by sign of positionAmt.
-    """
+    """Return (long_qty, short_qty) as positive numbers (0 if none)."""
     info = client.futures_position_information(symbol=symbol)
     long_q = 0.0
     short_q = 0.0
@@ -52,9 +49,9 @@ def read_live_qtys(symbol: str, is_hedge: bool) -> tuple[float, float]:
             side = p.get("positionSide")
             amt = float(p.get("positionAmt", "0"))
             if side == "LONG":
-                long_q = max(amt, 0.0)  # long is reported positive
+                long_q = max(amt, 0.0)
             elif side == "SHORT":
-                short_q = max(abs(amt), 0.0)  # short reported negative → abs
+                short_q = max(abs(amt), 0.0)
     else:
         amt = float(info[0].get("positionAmt", "0"))
         if amt > 0:
@@ -68,14 +65,22 @@ def read_live_qtys(symbol: str, is_hedge: bool) -> tuple[float, float]:
 def webhook():
     data = request.get_json(force=True, silent=True)
     print(f"Received Webhook: {data}")
+
     if not data or "signal" not in data:
         return jsonify({"status": "error", "message": "No/invalid signal"}), 400
 
-    signal   = str(data["signal"]).lower()
+    signal = str(data["signal"]).lower()
+
+    # 🟢 --- ป้องกัน alert ping ไม่ให้เรียก Binance API ---
+    if signal == "ping":
+        print("🟢 Received ping alert → skip Binance API.")
+        return jsonify({"status": "pong"}), 200
+    # ----------------------------------------------------
+
     symbol   = str(data.get("symbol", "BTCUSDT")).upper()
     amount   = float(data.get("amount", 10))
     leverage = int(data.get("leverage", 125))
-    side_in  = str(data.get("side", "")).upper()  # BUY=close long, SELL=close short (for 'close')
+    side_in  = str(data.get("side", "")).upper()
 
     # read mode & market info
     is_hedge = get_position_mode_is_hedge()
@@ -88,7 +93,6 @@ def webhook():
         print(f"⚠️ Set leverage error: {e}")
 
     try:
-        # use mark price for size calc
         price = float(client.futures_mark_price(symbol=symbol)["markPrice"])
         step  = get_symbol_step_size(symbol)
     except Exception as e:
@@ -121,24 +125,20 @@ def webhook():
             return jsonify({"status": "success", "orderId": order.get("orderId"), "qty": qty}), 200
 
         elif signal == "close":
-            # desired contracts from USDT lot
             desired = usdt_to_contracts(symbol, amount, leverage, price, step)
-
-            # read live position sizes
             long_qty, short_qty = read_live_qtys(symbol, is_hedge)
 
-            if side_in == "BUY":   # close LONG
+            if side_in == "BUY":
                 live       = long_qty
                 close_side = SIDE_SELL
                 pos_side   = "LONG"
-            elif side_in == "SELL":  # close SHORT
+            elif side_in == "SELL":
                 live       = short_qty
                 close_side = SIDE_BUY
                 pos_side   = "SHORT"
             else:
                 return jsonify({"status": "error", "message": "close needs side=BUY|SELL"}), 400
 
-            # cap to live position, then floor to step
             raw_close = min(live, desired)
             qty_to_close = floor_to_step(raw_close, step)
 
@@ -149,7 +149,6 @@ def webhook():
                 return jsonify({"status": "noop", "message": "Nothing to close"}), 200
 
             if is_hedge:
-                # HEDGE: use positionSide only (no reduceOnly)
                 order = client.futures_create_order(
                     symbol=symbol,
                     side=close_side,
@@ -158,7 +157,6 @@ def webhook():
                     positionSide=pos_side
                 )
             else:
-                # ONE-WAY: use reduceOnly
                 order = client.futures_create_order(
                     symbol=symbol,
                     side=close_side,
@@ -177,10 +175,11 @@ def webhook():
         print(f"❌ Error executing order: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
+
 @app.route("/ping", methods=["GET"])
 def ping():
     return jsonify({"status": "ok"})
 
+
 if __name__ == "__main__":
-    # รันเซิร์ฟเวอร์
-    app.run(host="0.0.0.0", port=5000)
+    app.run(host="0.0.0.0", port=10000)
