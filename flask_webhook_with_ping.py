@@ -1,200 +1,115 @@
+import os
+import json
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
-import os
-from math import floor
-from time import time
+from datetime import datetime
+
+# ---------------------------
+# 🔐 ตั้งค่า API Key / Secret จาก environment variable
+# ---------------------------
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 app = Flask(__name__)
 
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
-client = Client(API_KEY, API_SECRET)
+# ---------------------------
+# 🧩 ฟังก์ชันสร้าง client เฉพาะเมื่อจำเป็น
+# ---------------------------
+def get_binance_client():
+    """สร้าง Binance Client ตอนที่ต้องใช้งานจริงเท่านั้น"""
+    return Client(API_KEY, API_SECRET)
 
-# ---------- CACHE ----------
-_cached_exchange_info = None
-_cached_exchange_time = 0
-_CACHE_TTL = 3600  # cache 1 ชั่วโมง
 
-# ---------- Helpers ----------
-def get_position_mode_is_hedge() -> bool:
-    """True = Hedge mode, False = One-way."""
+# ---------------------------
+# 🧠 ฟังก์ชันส่งคำสั่งเทรดไป Binance
+# ---------------------------
+def execute_trade(symbol, side, position_side, qty, order_type=ORDER_TYPE_MARKET):
     try:
-        res = client.futures_get_position_mode()
-        raw = res.get("dualSidePosition")
-        return raw if isinstance(raw, bool) else str(raw).lower() == "true"
+        client = get_binance_client()
+        print(f"🚀 Sending order: {side} {qty} {symbol} ({position_side})")
+        order = client.futures_create_order(
+            symbol=symbol,
+            side=side,
+            type=order_type,
+            quantity=qty,
+            positionSide=position_side
+        )
+        print(f"✅ Binance order executed: {order['orderId']}")
+        return {"status": "success", "order_id": order["orderId"]}
     except Exception as e:
-        print(f"⚠️ Cannot read position mode, assume ONE-WAY. err={e}")
-        return False
+        print(f"❌ Binance order failed: {e}")
+        return {"status": "error", "message": str(e)}
 
 
-def get_symbol_step_size(symbol: str) -> float:
-    """LOT_SIZE step for qty rounding (cached 1hr)."""
-    global _cached_exchange_info, _cached_exchange_time
-    now = time()
-    if not _cached_exchange_info or (now - _cached_exchange_time) > _CACHE_TTL:
-        try:
-            _cached_exchange_info = client.futures_exchange_info()
-            _cached_exchange_time = now
-            print("🔄 Refreshed exchange_info from Binance")
-        except Exception as e:
-            print(f"⚠️ Failed to refresh exchange_info: {e}")
-            if not _cached_exchange_info:
-                raise e
-    info = _cached_exchange_info
-    sym = next(s for s in info["symbols"] if s["symbol"] == symbol)
-    for f in sym["filters"]:
-        if f["filterType"] == "LOT_SIZE":
-            return float(f["stepSize"])
-    return 0.0
-
-
-def floor_to_step(qty: float, step: float) -> float:
-    if step <= 0:
-        return float(qty)
-    return float(f"{(floor(qty / step) * step):.10f}")
-
-
-def usdt_to_contracts(symbol: str, amount_usd: float, leverage: int, price: float, step: float) -> float:
-    raw = (float(amount_usd) * int(leverage)) / float(price)
-    return floor_to_step(raw, step)
-
-
-def read_live_qtys(symbol: str, is_hedge: bool) -> tuple[float, float]:
-    """Return (long_qty, short_qty)"""
-    info = client.futures_position_information(symbol=symbol)
-    long_q = 0.0
-    short_q = 0.0
-    if is_hedge:
-        for p in info:
-            side = p.get("positionSide")
-            amt = float(p.get("positionAmt", "0"))
-            if side == "LONG":
-                long_q = max(amt, 0.0)
-            elif side == "SHORT":
-                short_q = max(abs(amt), 0.0)
-    else:
-        amt = float(info[0].get("positionAmt", "0"))
-        if amt > 0:
-            long_q = amt
-        elif amt < 0:
-            short_q = abs(amt)
-    return long_q, short_q
-
-# ---------- Routes ----------
-@app.route("/webhook", methods=["POST"])
+# ---------------------------
+# 🌐 Webhook Route
+# ---------------------------
+@app.route('/webhook', methods=['POST'])
 def webhook():
-    data = request.get_json(force=True, silent=True)
-    print(f"Received Webhook: {data}")
-    if not data:
-        return jsonify({"status": "error", "message": "No/invalid data"}), 400
-
-    # ✅ รองรับทั้ง signal และ type
-    signal = str(data.get("signal", data.get("type", ""))).lower()
-
-    # ✅ กัน ping alert ไม่ให้เรียก Binance API
-    if signal == "ping":
-        print("🟢 Received ping alert → skip Binance API.")
-        return jsonify({"status": "pong"}), 200
-
-    symbol   = str(data.get("symbol", "BTCUSDT")).upper()
-    amount   = float(data.get("amount", 10))
-    leverage = int(data.get("leverage", 125))
-    side_in  = str(data.get("side", "")).upper()  # BUY/SELL สำหรับ close
-
-    # --- ตรวจโหมด ---
-    is_hedge = get_position_mode_is_hedge()
-    print(f"ℹ️ HedgeMode={is_hedge} | symbol={symbol}")
-
-    # --- ตั้งค่า Leverage ---
     try:
-        client.futures_change_leverage(symbol=symbol, leverage=leverage)
-    except Exception as e:
-        print(f"⚠️ Set leverage error: {e}")
+        data = request.get_json()
+        print(f"Received Webhook: {data}")
 
-    try:
-        price = float(client.futures_mark_price(symbol=symbol)["markPrice"])
-        step  = get_symbol_step_size(symbol)
-    except Exception as e:
-        print(f"❌ Market/step fetch error: {e}")
-        return jsonify({"status": "error", "message": str(e)}), 500
+        # ✅ 1. ตรวจสอบว่าคือ alert ping
+        if data.get("type") == "ping":
+            print("🟢 Received ping alert → skip Binance API.")
+            return jsonify({"status": "ok", "message": "ping received"}), 200
 
-    try:
-        if signal in ("buy", "sell"):
-            qty = usdt_to_contracts(symbol, amount, leverage, price, step)
-            if qty <= 0:
-                return jsonify({"status": "error", "message": "qty<=0"}), 400
+        # ✅ 2. ตรวจสอบว่ามี signal type มาจริงไหม
+        signal_type = data.get("signal")
+        if not signal_type:
+            return jsonify({"status": "error", "message": "missing signal"}), 400
 
-            if is_hedge:
-                pos_side = "LONG" if signal == "buy" else "SHORT"
-                order = client.futures_create_order(
+        symbol = data.get("symbol", "BTCUSDT")
+        qty = float(data.get("qty", 0.001))
+
+        # ✅ 3. แยกประเภทสัญญาณ
+        if signal_type == "buy":
+            return jsonify(execute_trade(symbol, SIDE_BUY, "LONG", qty))
+
+        elif signal_type == "sell":
+            return jsonify(execute_trade(symbol, SIDE_SELL, "SHORT", qty))
+
+        elif signal_type == "close":
+            client = get_binance_client()
+            print("🔻 Closing all positions...")
+            try:
+                client.futures_cancel_all_open_orders(symbol=symbol)
+                client.futures_create_order(
                     symbol=symbol,
-                    side=SIDE_BUY if signal == "buy" else SIDE_SELL,
+                    side=SIDE_SELL,
                     type=ORDER_TYPE_MARKET,
                     quantity=qty,
-                    positionSide=pos_side
-                )
-            else:
-                order = client.futures_create_order(
-                    symbol=symbol,
-                    side=SIDE_BUY if signal == "buy" else SIDE_SELL,
-                    type=ORDER_TYPE_MARKET,
-                    quantity=qty
-                )
-            print(f"✅ Open {signal.upper()} {symbol} qty={qty}")
-            return jsonify({"status": "success", "orderId": order.get("orderId"), "qty": qty}), 200
-
-        elif signal == "close":
-            desired = usdt_to_contracts(symbol, amount, leverage, price, step)
-            long_qty, short_qty = read_live_qtys(symbol, is_hedge)
-
-            if side_in == "BUY":
-                live, close_side, pos_side = long_qty, SIDE_SELL, "LONG"
-            elif side_in == "SELL":
-                live, close_side, pos_side = short_qty, SIDE_BUY, "SHORT"
-            else:
-                return jsonify({"status": "error", "message": "close needs side=BUY|SELL"}), 400
-
-            raw_close = min(live, desired)
-            qty_to_close = floor_to_step(raw_close, step)
-
-            print(f"[DEBUG] close side={side_in}, live_long={long_qty}, live_short={short_qty}, desired={desired}, final_qty={qty_to_close}")
-
-            if qty_to_close <= 0:
-                return jsonify({"status": "noop", "message": "Nothing to close"}), 200
-
-            if is_hedge:
-                order = client.futures_create_order(
-                    symbol=symbol,
-                    side=close_side,
-                    type=ORDER_TYPE_MARKET,
-                    quantity=qty_to_close,
-                    positionSide=pos_side
-                )
-            else:
-                order = client.futures_create_order(
-                    symbol=symbol,
-                    side=close_side,
-                    type=ORDER_TYPE_MARKET,
-                    quantity=qty_to_close,
                     reduceOnly=True
                 )
-
-            print(f"✅ Close {symbol}: qty={qty_to_close}, mode={'HEDGE' if is_hedge else 'ONE-WAY'}")
-            return jsonify({"status": "success", "orderId": order.get('orderId'), "qty": qty_to_close}), 200
+                print("✅ All positions closed.")
+                return jsonify({"status": "success", "message": "positions closed"}), 200
+            except Exception as e:
+                print(f"❌ Close position failed: {e}")
+                return jsonify({"status": "error", "message": str(e)}), 400
 
         else:
-            return jsonify({"status": "error", "message": "Unknown signal"}), 400
+            return jsonify({"status": "ignored", "message": "unknown signal"}), 200
 
     except Exception as e:
-        print(f"❌ Error executing order: {e}")
+        print(f"❌ Webhook Error: {e}")
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
-@app.route("/ping", methods=["GET"])
-def ping():
-    return jsonify({"status": "ok"})
+# ---------------------------
+# 🧭 Route สำหรับตรวจสอบสถานะบอท
+# ---------------------------
+@app.route('/', methods=['GET'])
+def index():
+    return jsonify({
+        "status": "running",
+        "timestamp": datetime.utcnow().isoformat()
+    })
 
 
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+# ---------------------------
+# 🚀 Flask entrypoint
+# ---------------------------
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=10000)
