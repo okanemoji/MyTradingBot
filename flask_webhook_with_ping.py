@@ -11,10 +11,10 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 client = Client(API_KEY, API_SECRET)
 
-# ---------- Cache ----------
+# ---------- CACHE ----------
 _cached_exchange_info = None
 _cached_exchange_time = 0
-_CACHE_TTL = 3600  # 1 ชั่วโมง (3600 วินาที)
+_CACHE_TTL = 3600  # cache 1 ชั่วโมง
 
 # ---------- Helpers ----------
 def get_position_mode_is_hedge() -> bool:
@@ -40,8 +40,7 @@ def get_symbol_step_size(symbol: str) -> float:
         except Exception as e:
             print(f"⚠️ Failed to refresh exchange_info: {e}")
             if not _cached_exchange_info:
-                raise e  # ไม่มี cache เก่า → error เลย
-
+                raise e
     info = _cached_exchange_info
     sym = next(s for s in info["symbols"] if s["symbol"] == symbol)
     for f in sym["filters"]:
@@ -62,7 +61,7 @@ def usdt_to_contracts(symbol: str, amount_usd: float, leverage: int, price: floa
 
 
 def read_live_qtys(symbol: str, is_hedge: bool) -> tuple[float, float]:
-    """Return (long_qty, short_qty) as positive numbers (0 if none)."""
+    """Return (long_qty, short_qty)"""
     info = client.futures_position_information(symbol=symbol)
     long_q = 0.0
     short_q = 0.0
@@ -82,34 +81,32 @@ def read_live_qtys(symbol: str, is_hedge: bool) -> tuple[float, float]:
             short_q = abs(amt)
     return long_q, short_q
 
-
 # ---------- Routes ----------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True, silent=True)
     print(f"Received Webhook: {data}")
+    if not data:
+        return jsonify({"status": "error", "message": "No/invalid data"}), 400
 
-    if not data or "signal" not in data:
-        return jsonify({"status": "error", "message": "No/invalid signal"}), 400
+    # ✅ รองรับทั้ง signal และ type
+    signal = str(data.get("signal", data.get("type", ""))).lower()
 
-    signal = str(data["signal"]).lower()
-
-    # 🟢 --- ป้องกัน alert ping ไม่ให้เรียก Binance API ---
+    # ✅ กัน ping alert ไม่ให้เรียก Binance API
     if signal == "ping":
         print("🟢 Received ping alert → skip Binance API.")
         return jsonify({"status": "pong"}), 200
-    # ----------------------------------------------------
 
     symbol   = str(data.get("symbol", "BTCUSDT")).upper()
     amount   = float(data.get("amount", 10))
     leverage = int(data.get("leverage", 125))
-    side_in  = str(data.get("side", "")).upper()
+    side_in  = str(data.get("side", "")).upper()  # BUY/SELL สำหรับ close
 
-    # read mode & market info
+    # --- ตรวจโหมด ---
     is_hedge = get_position_mode_is_hedge()
     print(f"ℹ️ HedgeMode={is_hedge} | symbol={symbol}")
 
-    # set leverage (best effort)
+    # --- ตั้งค่า Leverage ---
     try:
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
     except Exception as e:
@@ -152,21 +149,16 @@ def webhook():
             long_qty, short_qty = read_live_qtys(symbol, is_hedge)
 
             if side_in == "BUY":
-                live       = long_qty
-                close_side = SIDE_SELL
-                pos_side   = "LONG"
+                live, close_side, pos_side = long_qty, SIDE_SELL, "LONG"
             elif side_in == "SELL":
-                live       = short_qty
-                close_side = SIDE_BUY
-                pos_side   = "SHORT"
+                live, close_side, pos_side = short_qty, SIDE_BUY, "SHORT"
             else:
                 return jsonify({"status": "error", "message": "close needs side=BUY|SELL"}), 400
 
             raw_close = min(live, desired)
             qty_to_close = floor_to_step(raw_close, step)
 
-            print(f"[DEBUG] close side={side_in}, live_long={long_qty}, live_short={short_qty}, "
-                  f"desired={desired}, step={step}, final_qty={qty_to_close}, pos_side={pos_side}")
+            print(f"[DEBUG] close side={side_in}, live_long={long_qty}, live_short={short_qty}, desired={desired}, final_qty={qty_to_close}")
 
             if qty_to_close <= 0:
                 return jsonify({"status": "noop", "message": "Nothing to close"}), 200
@@ -205,4 +197,4 @@ def ping():
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=10000)
+    app.run(host="0.0.0.0", port=5000)
