@@ -10,8 +10,8 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 TESTNET = False   # ตั้งเป็น True ถ้าจะใช้ Binance Futures Testnet
 
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_TELEGRAM_CHAT_ID"
+TELEGRAM_TOKEN = "8382343542:AAHQzPcHr1OxJU-dJbsRJwdEY-kB2ziJeq0"
+TELEGRAM_CHAT_ID = "8050524697"
 
 # ----------------------------------------
 app = Flask(__name__)
