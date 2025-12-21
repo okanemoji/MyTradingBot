@@ -9,14 +9,11 @@ from math import floor
 API_KEY    = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
-# Optional proxy (e.g. "http://user:pass@proxy-host:port")
 PROXY_URL = os.getenv("PROXY_URL")
 
-# Telegram
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
-# Misc
 DEFAULT_AMOUNT_USD = float(os.getenv("DEFAULT_AMOUNT_USD", "10"))
 DEFAULT_LEVERAGE = int(os.getenv("DEFAULT_LEVERAGE", "125"))
 
@@ -31,7 +28,6 @@ def make_binance_client():
     if not API_KEY or not API_SECRET:
         logger.warning("BINANCE_API_KEY or BINANCE_API_SECRET not set")
     client = Client(API_KEY, API_SECRET)
-    # attach proxy to client session if provided
     if PROXY_URL:
         try:
             client.session.proxies.update({"http": PROXY_URL, "https": PROXY_URL})
@@ -42,14 +38,12 @@ def make_binance_client():
 
 client = make_binance_client()
 
-# Use a requests.Session for internal HTTP checks (check_ip, telegram, etc.)
 requests_sess = requests.Session()
 if PROXY_URL:
     requests_sess.proxies.update({"http": PROXY_URL, "https": PROXY_URL})
 
 # -------------------- TELEGRAM --------------------
 def send_telegram_message(text):
-    """ส่งข้อความไป Telegram (ถ้า config ไว้)"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         logger.debug("Telegram not configured.")
         return
@@ -62,7 +56,6 @@ def send_telegram_message(text):
 
 # -------------------- HELPERS --------------------
 def get_position_mode_is_hedge() -> bool:
-    """ตรวจสอบว่าเป็น Hedge Mode หรือไม่"""
     try:
         res = client.futures_get_position_mode()
         raw = res.get("dualSidePosition")
@@ -96,7 +89,6 @@ def ping():
 
 @app.route("/check_ip", methods=["GET"])
 def check_ip():
-    """แสดง IP ที่บอท (server) ใช้ออกอินเทอร์เน็ต"""
     try:
         ip = requests_sess.get("https://ifconfig.me", timeout=5).text
     except Exception as e:
@@ -106,9 +98,8 @@ def check_ip():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """เช็กการเชื่อมต่อกับ Binance (non-trading check: server time)"""
     try:
-        c = make_binance_client()  # ปรับ client ใหม่เผื่อ env เปลี่ยนขณะรัน
+        c = make_binance_client()
         t = c.get_server_time()
         return jsonify({"status": "ok", "serverTime": t})
     except Exception as e:
@@ -117,7 +108,6 @@ def health():
 
 @app.route("/test_order", methods=["POST"])
 def test_order():
-    """สร้าง market order ขนาดเล็กเพื่อทดสอบ (จริง)"""
     data = request.get_json(force=True, silent=True) or {}
     side = data.get("side", "BUY").upper()
     symbol = data.get("symbol", "BTCUSDT")
@@ -159,13 +149,11 @@ def webhook():
     is_hedge = get_position_mode_is_hedge()
     logger.info(f"HedgeMode={is_hedge} | symbol={symbol}")
 
-    # Set leverage (ignore error)
     try:
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
     except Exception as e:
         logger.warning(f"Leverage error: {e}")
 
-    # Fetch price & step size
     try:
         price = float(client.futures_mark_price(symbol=symbol)["markPrice"])
         step = get_symbol_step_size(symbol)
@@ -203,7 +191,7 @@ def webhook():
             send_telegram_message(msg)
             return jsonify({"status": "success", "orderId": order.get("orderId"), "qty": qty}), 200
 
-        # CLOSE POSITION
+        # CLOSE POSITION (PARTIAL CLOSE ENABLED)
         elif signal == "close":
             logger.info(f"Close signal received | side={side}")
 
@@ -217,40 +205,47 @@ def webhook():
                 return jsonify({"error": "Invalid side for close"}), 400
 
             positions = client.futures_position_information(symbol=symbol)
-            qty_to_close = 0.0
+
+            position_qty = 0.0
             for p in positions:
-                # positionAmt is signed: positive for long, negative for short (if one-way) or depends on positionSide in hedge
-                if p.get("positionSide", "").upper() == position_side and abs(float(p.get("positionAmt", 0))) > 0:
-                    qty_to_close = abs(float(p.get("positionAmt", 0)))
+                if p.get("positionSide", "").upper() == position_side:
+                    position_qty = abs(float(p.get("positionAmt", 0)))
                     break
 
-            if qty_to_close > 0:
-                if is_hedge:
-                    order = client.futures_create_order(
-                        symbol=symbol,
-                        side=close_side,
-                        type="MARKET",
-                        quantity=qty_to_close,
-                        positionSide=position_side
-                    )
-                else:
-                    order = client.futures_create_order(
-                        symbol=symbol,
-                        side=close_side,
-                        type="MARKET",
-                        quantity=qty_to_close,
-                        reduceOnly=True
-                    )
-
-                msg = f"✅ Close {position_side} {symbol} qty={qty_to_close}"
-                logger.info(msg)
-                send_telegram_message(msg)
-                return jsonify({"status": "closed", "qty": qty_to_close}), 200
-            else:
+            if position_qty <= 0:
                 msg = f"⚠️ No {position_side} position to close for {symbol}"
                 logger.info(msg)
                 send_telegram_message(msg)
                 return jsonify({"status": "noop"}), 200
+
+            # <<< MODIFIED FOR PARTIAL CLOSE >>>
+            desired_qty = usdt_to_contracts(symbol, amount, leverage, price, step)
+            qty_to_close = min(position_qty, desired_qty)
+
+            if qty_to_close <= 0:
+                return jsonify({"error": "qty_to_close <= 0"}), 400
+
+            if is_hedge:
+                order = client.futures_create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    type="MARKET",
+                    quantity=qty_to_close,
+                    positionSide=position_side
+                )
+            else:
+                order = client.futures_create_order(
+                    symbol=symbol,
+                    side=close_side,
+                    type="MARKET",
+                    quantity=qty_to_close,
+                    reduceOnly=True
+                )
+
+            msg = f"✅ Partial Close {position_side} {symbol} qty={qty_to_close}"
+            logger.info(msg)
+            send_telegram_message(msg)
+            return jsonify({"status": "closed", "qty": qty_to_close}), 200
 
         else:
             return jsonify({"error": "Unknown signal"}), 400
@@ -263,5 +258,4 @@ def webhook():
 # -------------------- MAIN --------------------
 if __name__ == "__main__":
     logger.info("Starting Flask app")
-    # For Render, use the recommended host/port; here run for local debugging
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
