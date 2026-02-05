@@ -5,7 +5,7 @@ from binance.exceptions import BinanceAPIException
 import os, requests, logging, time
 from math import floor
 
-# -------------------- CONFIG --------------------
+# ================= CONFIG =================
 API_KEY    = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
@@ -14,18 +14,18 @@ PROXY_URL = os.getenv("PROXY_URL")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
-DEFAULT_AMOUNT_USD = float(os.getenv("DEFAULT_AMOUNT_USD", "10"))
-FIXED_LEVERAGE     = int(os.getenv("FIXED_LEVERAGE", "100"))
+DEFAULT_AMOUNT_USD = float(os.getenv("DEFAULT_AMOUNT_USD", "10"))   # ไม้ละ 10$
+FIXED_LEVERAGE     = int(os.getenv("FIXED_LEVERAGE", "100"))        # leverage จริง
 SYMBOL_DEFAULT     = os.getenv("DEFAULT_SYMBOL", "XPTUSDT")
 
-# -------------------- LOGGING --------------------
+# ================= LOGGING =================
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("bot")
 
-# -------------------- APP --------------------
+# ================= APP =================
 app = Flask(__name__)
 
-# -------------------- BINANCE CLIENT --------------------
+# ================= BINANCE CLIENT =================
 def make_binance_client():
     client = Client(API_KEY, API_SECRET)
     if PROXY_URL:
@@ -34,7 +34,7 @@ def make_binance_client():
 
 client = make_binance_client()
 
-# -------------------- TELEGRAM --------------------
+# ================= TELEGRAM =================
 requests_sess = requests.Session()
 if PROXY_URL:
     requests_sess.proxies.update({"http": PROXY_URL, "https": PROXY_URL})
@@ -48,35 +48,18 @@ def send_telegram(text):
     except Exception as e:
         logger.warning(f"Telegram error: {e}")
 
-# -------------------- GLOBAL CACHE --------------------
+# ================= GLOBAL STATE =================
 STEP_SIZE = {}
 POSITION_MODE_HEDGE = False
 LEVERAGE_SET = set()
+
+EXCHANGE_READY = False
+LAST_PRELOAD_ATTEMPT = 0
+PRELOAD_COOLDOWN = 60 * 10  # 10 นาที
+
 LAST_SIGNAL = {}
 
-# -------------------- PRELOAD (RUN ON START) --------------------
-def preload():
-    global POSITION_MODE_HEDGE, STEP_SIZE
-
-    logger.info("Preloading exchange info...")
-
-    # exchangeInfo (หนัก → เรียกครั้งเดียว)
-    info = client.futures_exchange_info()
-    for s in info["symbols"]:
-        for f in s["filters"]:
-            if f["filterType"] == "LOT_SIZE":
-                STEP_SIZE[s["symbol"]] = float(f["stepSize"])
-
-    # position mode (ครั้งเดียว)
-    res = client.futures_get_position_mode()
-    POSITION_MODE_HEDGE = bool(res.get("dualSidePosition", False))
-
-    logger.info(f"HedgeMode={POSITION_MODE_HEDGE}")
-    logger.info(f"Cached symbols: {len(STEP_SIZE)}")
-
-preload()
-
-# -------------------- HELPERS --------------------
+# ================= HELPERS =================
 def floor_to_step(qty: float, step: float) -> float:
     return float(f"{floor(qty / step) * step:.10f}")
 
@@ -93,12 +76,46 @@ def debounce(symbol, signal, sec=2):
     LAST_SIGNAL[key] = now
     return False
 
-# -------------------- ROOT (KEEP ALIVE) --------------------
+# ================= LAZY PRELOAD =================
+def try_preload():
+    global STEP_SIZE, POSITION_MODE_HEDGE, EXCHANGE_READY, LAST_PRELOAD_ATTEMPT
+
+    if EXCHANGE_READY:
+        return True
+
+    now = time.time()
+    if now - LAST_PRELOAD_ATTEMPT < PRELOAD_COOLDOWN:
+        return False
+
+    LAST_PRELOAD_ATTEMPT = now
+    logger.info("Trying preload exchange info...")
+
+    try:
+        info = client.futures_exchange_info()
+        STEP_SIZE.clear()
+
+        for s in info["symbols"]:
+            for f in s["filters"]:
+                if f["filterType"] == "LOT_SIZE":
+                    STEP_SIZE[s["symbol"]] = float(f["stepSize"])
+
+        res = client.futures_get_position_mode()
+        POSITION_MODE_HEDGE = bool(res.get("dualSidePosition", False))
+
+        EXCHANGE_READY = True
+        logger.info("✅ Preload success")
+        return True
+
+    except Exception as e:
+        logger.error(f"❌ Preload failed (will retry later): {e}")
+        return False
+
+# ================= ROOT =================
 @app.route("/", methods=["GET"])
 def root():
     return "OK", 200
 
-# -------------------- WEBHOOK --------------------
+# ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True, silent=True)
@@ -107,15 +124,21 @@ def webhook():
     if not data:
         return jsonify({"status": "noop"}), 200
 
+    # preload แบบปลอดภัย
+    if not try_preload():
+        return jsonify({
+            "status": "exchange_not_ready",
+            "message": "Binance API not ready yet"
+        }), 503
+
     signal = str(data.get("signal", "")).lower()
     symbol = str(data.get("symbol", SYMBOL_DEFAULT)).replace("BINANCE:", "")
     amount = float(data.get("amount", DEFAULT_AMOUNT_USD))
 
     if debounce(symbol, signal):
-        logger.info("Duplicate webhook ignored")
         return jsonify({"status": "duplicate"}), 200
 
-    # ---------------- SET LEVERAGE (ONCE) ----------------
+    # -------- SET LEVERAGE (ครั้งเดียว) --------
     try:
         if symbol not in LEVERAGE_SET:
             client.futures_change_leverage(symbol=symbol, leverage=FIXED_LEVERAGE)
@@ -130,7 +153,7 @@ def webhook():
         if qty <= 0:
             return jsonify({"error": "qty <= 0"}), 400
 
-        # ---------------- OPEN ----------------
+        # -------- OPEN --------
         if signal in ["buy", "sell"]:
             side = SIDE_BUY if signal == "buy" else SIDE_SELL
 
@@ -148,7 +171,7 @@ def webhook():
             send_telegram(f"✅ OPEN {signal.upper()} {symbol} qty={qty}")
             return jsonify({"status": "opened", "qty": qty}), 200
 
-        # ---------------- CLOSE ----------------
+        # -------- CLOSE --------
         if signal == "close":
             positions = client.futures_position_information(symbol=symbol)
 
@@ -187,7 +210,7 @@ def webhook():
         send_telegram(f"❌ Error: {e}")
         return jsonify({"error": str(e)}), 500
 
-# -------------------- MAIN --------------------
+# ================= MAIN =================
 if __name__ == "__main__":
     logger.info("Starting bot")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
