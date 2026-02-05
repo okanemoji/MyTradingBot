@@ -1,8 +1,8 @@
-# app.py
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
-import os, requests, logging
+from binance.exceptions import BinanceAPIException
+import os, requests, logging, time
 from math import floor
 
 # -------------------- CONFIG --------------------
@@ -15,188 +15,179 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 DEFAULT_AMOUNT_USD = float(os.getenv("DEFAULT_AMOUNT_USD", "10"))
-DEFAULT_LEVERAGE   = int(os.getenv("DEFAULT_LEVERAGE", "125"))
+FIXED_LEVERAGE     = int(os.getenv("FIXED_LEVERAGE", "100"))
+SYMBOL_DEFAULT     = os.getenv("DEFAULT_SYMBOL", "XPTUSDT")
 
 # -------------------- LOGGING --------------------
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger("bot")
 
-# -------------------- APP & CLIENT --------------------
+# -------------------- APP --------------------
 app = Flask(__name__)
 
+# -------------------- BINANCE CLIENT --------------------
 def make_binance_client():
-    if not API_KEY or not API_SECRET:
-        logger.warning("BINANCE_API_KEY or BINANCE_API_SECRET not set")
     client = Client(API_KEY, API_SECRET)
     if PROXY_URL:
-        try:
-            client.session.proxies.update({"http": PROXY_URL, "https": PROXY_URL})
-            logger.info("Applied proxy to binance client")
-        except Exception as e:
-            logger.warning(f"Cannot apply proxy: {e}")
+        client.session.proxies.update({"http": PROXY_URL, "https": PROXY_URL})
     return client
 
 client = make_binance_client()
 
+# -------------------- TELEGRAM --------------------
 requests_sess = requests.Session()
 if PROXY_URL:
     requests_sess.proxies.update({"http": PROXY_URL, "https": PROXY_URL})
 
-# -------------------- ROOT (KEEP ALIVE) --------------------
-@app.route("/", methods=["GET"])
-def root():
-    # ใช้ปลุก Render / UptimeRobot / Ping
-    return "OK", 200
-
-# -------------------- TELEGRAM --------------------
-def send_telegram_message(text):
+def send_telegram(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
-        requests_sess.post(url, json=payload, timeout=6)
+        requests_sess.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=5)
     except Exception as e:
         logger.warning(f"Telegram error: {e}")
 
-# -------------------- HELPERS --------------------
-def get_position_mode_is_hedge() -> bool:
-    try:
-        res = client.futures_get_position_mode()
-        raw = res.get("dualSidePosition")
-        return raw if isinstance(raw, bool) else str(raw).lower() == "true"
-    except Exception as e:
-        logger.warning(f"Cannot read position mode: {e}")
-        return False
+# -------------------- GLOBAL CACHE --------------------
+STEP_SIZE = {}
+POSITION_MODE_HEDGE = False
+LEVERAGE_SET = set()
+LAST_SIGNAL = {}
 
-def get_symbol_step_size(symbol: str) -> float:
-    try:
-        info = client.futures_exchange_info()
-        sym = next(s for s in info["symbols"] if s["symbol"] == symbol)
-        for f in sym["filters"]:
+# -------------------- PRELOAD (RUN ON START) --------------------
+def preload():
+    global POSITION_MODE_HEDGE, STEP_SIZE
+
+    logger.info("Preloading exchange info...")
+
+    # exchangeInfo (หนัก → เรียกครั้งเดียว)
+    info = client.futures_exchange_info()
+    for s in info["symbols"]:
+        for f in s["filters"]:
             if f["filterType"] == "LOT_SIZE":
-                return float(f["stepSize"])
-    except Exception as e:
-        logger.warning(f"get_symbol_step_size error: {e}")
-    return 0.001
+                STEP_SIZE[s["symbol"]] = float(f["stepSize"])
 
+    # position mode (ครั้งเดียว)
+    res = client.futures_get_position_mode()
+    POSITION_MODE_HEDGE = bool(res.get("dualSidePosition", False))
+
+    logger.info(f"HedgeMode={POSITION_MODE_HEDGE}")
+    logger.info(f"Cached symbols: {len(STEP_SIZE)}")
+
+preload()
+
+# -------------------- HELPERS --------------------
 def floor_to_step(qty: float, step: float) -> float:
     return float(f"{floor(qty / step) * step:.10f}")
 
-def usdt_to_contracts(symbol, amount_usd, leverage, price, step):
-    raw = (float(amount_usd) * int(leverage)) / float(price)
+def usdt_to_qty(symbol, usd, price):
+    step = STEP_SIZE.get(symbol, 0.001)
+    raw = (usd * FIXED_LEVERAGE) / price
     return floor_to_step(raw, step)
+
+def debounce(symbol, signal, sec=2):
+    key = f"{symbol}:{signal}"
+    now = time.time()
+    if key in LAST_SIGNAL and now - LAST_SIGNAL[key] < sec:
+        return True
+    LAST_SIGNAL[key] = now
+    return False
+
+# -------------------- ROOT (KEEP ALIVE) --------------------
+@app.route("/", methods=["GET"])
+def root():
+    return "OK", 200
 
 # -------------------- WEBHOOK --------------------
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True, silent=True)
-    logger.info(f"Received Webhook: {data}")
+    logger.info(f"Webhook: {data}")
 
-    # =================================================
-    # ✅ PING HANDLER (NO BINANCE TOUCH)
-    # =================================================
-    if not data or data.get("type") == "ping":
-        return jsonify({"status": "alive"}), 200
+    if not data:
+        return jsonify({"status": "noop"}), 200
 
-    # -------------------- PARSE --------------------
-    signal   = str(data.get("signal", "")).lower()
-    symbol   = str(data.get("symbol", "BTCUSDT")).replace("BINANCE:", "")
-    amount   = float(data.get("amount", DEFAULT_AMOUNT_USD))
-    leverage = int(data.get("leverage", DEFAULT_LEVERAGE))
-    side     = str(data.get("side", "")).upper()
+    signal = str(data.get("signal", "")).lower()
+    symbol = str(data.get("symbol", SYMBOL_DEFAULT)).replace("BINANCE:", "")
+    amount = float(data.get("amount", DEFAULT_AMOUNT_USD))
 
-    is_hedge = get_position_mode_is_hedge()
-    logger.info(f"HedgeMode={is_hedge} | symbol={symbol}")
+    if debounce(symbol, signal):
+        logger.info("Duplicate webhook ignored")
+        return jsonify({"status": "duplicate"}), 200
 
-    # -------------------- SET LEVERAGE --------------------
+    # ---------------- SET LEVERAGE (ONCE) ----------------
     try:
-        client.futures_change_leverage(symbol=symbol, leverage=leverage)
+        if symbol not in LEVERAGE_SET:
+            client.futures_change_leverage(symbol=symbol, leverage=FIXED_LEVERAGE)
+            LEVERAGE_SET.add(symbol)
     except Exception as e:
-        logger.warning(f"Leverage error: {e}")
+        logger.warning(f"Leverage set error: {e}")
 
-    # -------------------- MARKET INFO --------------------
     try:
         price = float(client.futures_mark_price(symbol=symbol)["markPrice"])
-        step  = get_symbol_step_size(symbol)
-    except Exception as e:
-        logger.error(f"Market info error: {e}")
-        return jsonify({"error": str(e)}), 500
+        qty   = usdt_to_qty(symbol, amount, price)
 
-    try:
-        # ================= OPEN =================
+        if qty <= 0:
+            return jsonify({"error": "qty <= 0"}), 400
+
+        # ---------------- OPEN ----------------
         if signal in ["buy", "sell"]:
-            qty = usdt_to_contracts(symbol, amount, leverage, price, step)
-            if qty <= 0:
-                return jsonify({"error": "qty <= 0"}), 400
+            side = SIDE_BUY if signal == "buy" else SIDE_SELL
 
-            if is_hedge:
-                pos_side = "LONG" if signal == "buy" else "SHORT"
-                order = client.futures_create_order(
-                    symbol=symbol,
-                    side=SIDE_BUY if signal == "buy" else SIDE_SELL,
-                    type="MARKET",
-                    quantity=qty,
-                    positionSide=pos_side
-                )
-            else:
-                order = client.futures_create_order(
-                    symbol=symbol,
-                    side=SIDE_BUY if signal == "buy" else SIDE_SELL,
-                    type="MARKET",
-                    quantity=qty
-                )
+            params = {
+                "symbol": symbol,
+                "side": side,
+                "type": "MARKET",
+                "quantity": qty
+            }
 
-            send_telegram_message(f"✅ Open {signal.upper()} {symbol} qty={qty}")
-            return jsonify({"status": "success", "qty": qty}), 200
+            if POSITION_MODE_HEDGE:
+                params["positionSide"] = "LONG" if signal == "buy" else "SHORT"
 
-        # ================= CLOSE (PARTIAL) =================
-        elif signal == "close":
-            position_side = "LONG" if side == "BUY" else "SHORT"
-            close_side    = SIDE_SELL if side == "BUY" else SIDE_BUY
+            client.futures_create_order(**params)
+            send_telegram(f"✅ OPEN {signal.upper()} {symbol} qty={qty}")
+            return jsonify({"status": "opened", "qty": qty}), 200
 
+        # ---------------- CLOSE ----------------
+        if signal == "close":
             positions = client.futures_position_information(symbol=symbol)
-            pos_qty = 0.0
+
             for p in positions:
-                if p.get("positionSide", "").upper() == position_side:
-                    pos_qty = abs(float(p.get("positionAmt", 0)))
-                    break
+                amt = float(p["positionAmt"])
+                if amt == 0:
+                    continue
 
-            if pos_qty <= 0:
-                return jsonify({"status": "noop"}), 200
+                close_side = SIDE_SELL if amt > 0 else SIDE_BUY
+                params = {
+                    "symbol": symbol,
+                    "side": close_side,
+                    "type": "MARKET",
+                    "quantity": abs(amt),
+                    "reduceOnly": True
+                }
 
-            desired_qty = usdt_to_contracts(symbol, amount, leverage, price, step)
-            qty_to_close = min(pos_qty, desired_qty)
+                if POSITION_MODE_HEDGE:
+                    params["positionSide"] = p["positionSide"]
 
-            if is_hedge:
-                client.futures_create_order(
-                    symbol=symbol,
-                    side=close_side,
-                    type="MARKET",
-                    quantity=qty_to_close,
-                    positionSide=position_side
-                )
-            else:
-                client.futures_create_order(
-                    symbol=symbol,
-                    side=close_side,
-                    type="MARKET",
-                    quantity=qty_to_close,
-                    reduceOnly=True
-                )
+                client.futures_create_order(**params)
 
-            send_telegram_message(f"✅ Close {position_side} {symbol} qty={qty_to_close}")
-            return jsonify({"status": "closed", "qty": qty_to_close}), 200
+            send_telegram(f"✅ CLOSE {symbol}")
+            return jsonify({"status": "closed"}), 200
 
-        else:
-            return jsonify({"error": "Unknown signal"}), 400
+        return jsonify({"error": "unknown signal"}), 400
+
+    except BinanceAPIException as e:
+        if e.code == -1003:
+            logger.critical("RATE LIMIT HIT - STOP")
+            return jsonify({"error": "rate limited"}), 429
+        raise
 
     except Exception as e:
-        logger.error(f"Webhook Error: {e}")
-        send_telegram_message(f"❌ Error: {e}")
+        logger.error(f"Error: {e}")
+        send_telegram(f"❌ Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 # -------------------- MAIN --------------------
 if __name__ == "__main__":
-    logger.info("Starting Flask app")
+    logger.info("Starting bot")
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)))
