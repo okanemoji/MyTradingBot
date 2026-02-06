@@ -14,7 +14,7 @@ PROXY_URL = os.getenv("PROXY_URL")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
-DEFAULT_AMOUNT_USD = float(os.getenv("DEFAULT_AMOUNT_USD", "10"))   # ไม้ละ 10$
+DEFAULT_AMOUNT_USD = float(os.getenv("DEFAULT_AMOUNT_USD", "2"))   # ไม้ละ 10$
 FIXED_LEVERAGE     = int(os.getenv("FIXED_LEVERAGE", "100"))        # leverage จริง
 SYMBOL_DEFAULT     = os.getenv("DEFAULT_SYMBOL", "XPTUSDT")
 
