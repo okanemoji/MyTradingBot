@@ -4,11 +4,9 @@ from binance.enums import *
 from dotenv import load_dotenv
 import os
 import time
-import json   # << จำเป็นมาก
 
 # ================= ENV =================
 load_dotenv()
-
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
@@ -43,11 +41,9 @@ def get_position(client, symbol, position_side):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        # 🔥 FIX 415 ตรงนี้
-        if request.is_json:
-            data = request.get_json()
-        else:
-            data = json.loads(request.data.decode("utf-8"))
+        data = request.get_json(force=True, silent=True)
+        if not data:
+            return jsonify({"error": "invalid json"}), 400
 
         print("📩 Received:", data)
 
@@ -56,11 +52,13 @@ def webhook():
 
         action = data.get("action")
         symbol = data.get("symbol")
+        side = data.get("side")
 
-        # ===== CLOSE POSITION =====
+        if not action or not symbol or not side:
+            return jsonify({"error": "missing action/symbol/side"}), 400
+
+        # ================= CLOSE =================
         if action == "CLOSE":
-            side = data["side"]
-
             position_side = "LONG" if side == "BUY" else "SHORT"
             close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
 
@@ -80,18 +78,26 @@ def webhook():
                 timestamp=ts
             )
 
-            return jsonify({"status": "closed", "order": order})
+            return jsonify({"status": "closed", "qty": qty})
 
-        # ===== OPEN POSITION =====
+        # ================= OPEN =================
         if action == "OPEN":
-            side = data["side"]
-            amount = float(data["amount"])
-            leverage = int(data["leverage"])
+            amount = data.get("amount")
+            leverage = data.get("leverage")
+
+            if amount is None or leverage is None:
+                return jsonify({"error": "missing amount or leverage"}), 400
+
+            amount = float(amount)
+            leverage = int(leverage)
 
             position_side = "LONG" if side == "BUY" else "SHORT"
             order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
-            client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            client.futures_change_leverage(
+                symbol=symbol,
+                leverage=leverage
+            )
 
             order = client.futures_create_order(
                 symbol=symbol,
@@ -102,13 +108,14 @@ def webhook():
                 timestamp=ts
             )
 
-            return jsonify({"status": "opened", "order": order})
+            return jsonify({"status": "opened", "qty": amount})
 
-        return jsonify({"error": "invalid action"}), 400
+        return jsonify({"error": "unknown action"}), 400
 
     except Exception as e:
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
+
 
 # ================= RUN =================
 if __name__ == "__main__":
