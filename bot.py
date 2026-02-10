@@ -40,8 +40,9 @@ def get_position(client, symbol, position_side):
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    try:
-        data = request.get_json(force=True, silent=True)
+    print("RAW DATA:", request.data)
+    data = request.get_json(force=True, silent=True)
+
         if not data:
             return jsonify({"error": "invalid json"}), 400
 
