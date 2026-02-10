@@ -4,6 +4,7 @@ from binance.enums import *
 from dotenv import load_dotenv
 import os
 import time
+import json
 
 # ================= ENV =================
 load_dotenv()
@@ -46,15 +47,25 @@ def get_position(client, symbol, position_side):
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
-    print("📩 Received:", data)
+    # 🔧 FIX: parse JSON เอง (TradingView ส่ง text/plain)
+    try:
+        raw = request.data.decode("utf-8")
+        data = json.loads(raw)
+        print("📩 Received:", data)
+    except Exception as e:
+        print("❌ JSON parse error:", e)
+        print("RAW:", request.data)
+        return jsonify({"error": "bad json"}), 400
 
     try:
         client = get_client()
         ts = get_timestamp(client)
 
         action = data.get("action")
-        symbol = data["symbol"]
+        symbol = data.get("symbol")
+
+        if not action or not symbol:
+            return jsonify({"error": "missing action or symbol"}), 400
 
         # ===== CLOSE POSITION (ปิด 100%) =====
         if action == "CLOSE":
@@ -106,7 +117,7 @@ def webhook():
 
             return jsonify({"status": "opened", "order": order})
 
-        return jsonify({"error": "invalid action"})
+        return jsonify({"error": "invalid action"}), 400
 
     except Exception as e:
         print("❌ ERROR:", e)
