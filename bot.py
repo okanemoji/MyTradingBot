@@ -4,6 +4,7 @@ from binance.enums import *
 from dotenv import load_dotenv
 import os
 import time
+import json   # << จำเป็นมาก
 
 # ================= ENV =================
 load_dotenv()
@@ -14,10 +15,8 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 app = Flask(__name__)
 
 # ================= SAFE CLIENT =================
-# สร้าง client เฉพาะตอนมี webhook (กันโดน -1003)
 def get_client():
     client = Client(API_KEY, API_SECRET)
-    # ใช้ testnet
     client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
     return client
 
@@ -33,35 +32,39 @@ def home():
     return "OK"
 
 # ================= UTILS =================
-# ดึง position ที่มีอยู่ (ไม่สน LONG / SHORT)
-def get_position(client, symbol):
+def get_position(client, symbol, position_side):
     positions = client.futures_position_information(symbol=symbol)
     for p in positions:
-        if abs(float(p["positionAmt"])) > 0:
+        if p["positionSide"] == position_side and abs(float(p["positionAmt"])) > 0:
             return p
     return None
 
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
-    print("📩 Received:", data)
-
     try:
+        # 🔥 FIX 415 ตรงนี้
+        if request.is_json:
+            data = request.get_json()
+        else:
+            data = json.loads(request.data.decode("utf-8"))
+
+        print("📩 Received:", data)
+
         client = get_client()
         ts = get_timestamp(client)
 
         action = data.get("action")
-        symbol = data["symbol"]
+        symbol = data.get("symbol")
 
-        # ===== CLOSE POSITION (ปิด 100%) =====
+        # ===== CLOSE POSITION =====
         if action == "CLOSE":
-            side = data["side"]  # BUY หรือ SELL
+            side = data["side"]
 
-            # ถ้าปิด LONG → SELL | ปิด SHORT → BUY
+            position_side = "LONG" if side == "BUY" else "SHORT"
             close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
 
-            pos = get_position(client, symbol)
+            pos = get_position(client, symbol, position_side)
             if not pos:
                 return jsonify({"status": "no position to close"})
 
@@ -72,6 +75,7 @@ def webhook():
                 side=close_side,
                 type=ORDER_TYPE_MARKET,
                 quantity=qty,
+                positionSide=position_side,
                 reduceOnly=True,
                 timestamp=ts
             )
@@ -80,36 +84,33 @@ def webhook():
 
         # ===== OPEN POSITION =====
         if action == "OPEN":
-            side = data["side"]          # BUY / SELL
+            side = data["side"]
             amount = float(data["amount"])
             leverage = int(data["leverage"])
 
+            position_side = "LONG" if side == "BUY" else "SHORT"
             order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
-            # ตั้ง leverage
-            client.futures_change_leverage(
-                symbol=symbol,
-                leverage=leverage
-            )
+            client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
             order = client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
                 type=ORDER_TYPE_MARKET,
                 quantity=amount,
+                positionSide=position_side,
                 timestamp=ts
             )
 
             return jsonify({"status": "opened", "order": order})
 
-        return jsonify({"error": "invalid action"})
+        return jsonify({"error": "invalid action"}), 400
 
     except Exception as e:
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
 
-
 # ================= RUN =================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
