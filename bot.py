@@ -1,66 +1,113 @@
-def force_clear_position(symbol):
-    """ดึงจำนวนเหรียญจริงมาสั่งปิดให้หมดพอร์ต"""
+import os
+import time
+from flask import Flask, request, jsonify
+from binance.client import Client
+from binance.enums import *
+from dotenv import load_dotenv
+
+# --- SETUP ---
+load_dotenv()
+app = Flask(__name__)
+
+# ดึง API Key จาก Environment Variables ใน Render
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+
+client = Client(API_KEY, API_SECRET)
+# ถ้าใช้พอร์ตจริงให้เปลี่ยนเป็น https://fapi.binance.com
+client.FUTURES_URL = "https://testnet.binancefuture.com/fapi" 
+
+# ฟังก์ชัน Sync เวลาป้องกัน Error -1021
+def sync_time():
     try:
-        # 1. ดึงข้อมูล Position ทั้งหมด
+        server_time = client.get_server_time()["serverTime"]
+        client.timestamp_offset = server_time - int(time.time() * 1000)
+    except:
+        pass
+
+sync_time()
+
+# --- FUNCTIONS ---
+
+def close_all_by_side(symbol, pos_side):
+    """ ปิดสถานะฝั่งที่ระบุให้เกลี้ยง 100% (LONG หรือ SHORT) """
+    try:
         positions = client.futures_position_information(symbol=symbol)
         for p in positions:
-            amt = float(p['positionAmt'])
-            if amt != 0:
-                # ถ้ามีของค้าง ไม่ว่าจะ Long (+) หรือ Short (-)
-                # ยิง Market Order ฝั่งตรงข้ามตามจำนวนที่มีเป๊ะๆ
-                side_to_close = SIDE_SELL if amt > 0 else SIDE_BUY
-                client.futures_create_order(
-                    symbol=symbol,
-                    side=side_to_close,
-                    type=ORDER_TYPE_MARKET,
-                    quantity=abs(amt),
-                    reduceOnly=True
-                )
-        # 2. ล้างออเดอร์ค้าง (SL/TP)
+            if p["positionSide"] == pos_side:
+                amt = abs(float(p["positionAmt"]))
+                if amt > 0:
+                    # ถ้าจะปิด LONG ต้องส่ง SELL | ถ้าจะปิด SHORT ต้องส่ง BUY
+                    side = SIDE_SELL if pos_side == "LONG" else SIDE_BUY
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side=side,
+                        type=ORDER_TYPE_MARKET,
+                        quantity=amt,
+                        positionSide=pos_side
+                    )
+                    print(f"🧹 Closed {pos_side} size {amt}")
         client.futures_cancel_all_open_orders(symbol=symbol)
-        return True
     except Exception as e:
-        print(f"❌ Force Clear Error: {e}")
-        return False
+        print(f"❌ Error Closing {pos_side}: {e}")
+
+# --- WEBHOOK ENDPOINT ---
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    global last_side
     data = request.json
-    action = data.get("action", "").upper()
+    if not data:
+        return jsonify({"status": "error"}), 400
+
+    action = data.get("action", "").upper() # BUY, SELL, CLOSE
     symbol = data.get("symbol")
-    qty = data.get("amount")
-    lev = data.get("leverage")
+    
+    print(f"📩 Received: {action} on {symbol}")
 
     try:
-        # --- กรณีสั่ง CLOSE ---
+        # กรณีสั่ง CLOSE (กวาดล้างทั้ง 2 ฝั่ง)
         if action == "CLOSE":
-            force_clear_position(symbol)
-            last_side[symbol] = None
-            print(f"🧹 {symbol} Fully Cleared")
-            return jsonify({"status": "success"}), 200
+            close_all_by_side(symbol, "LONG")
+            close_all_by_side(symbol, "SHORT")
+            return jsonify({"status": "closed_all"}), 200
 
-        # --- กรณีสั่ง BUY หรือ SELL ---
-        elif action in ["BUY", "SELL"]:
-            if lev:
-                client.futures_change_leverage(symbol=symbol, leverage=int(lev))
+        # กรณีสั่งเปิดไม้ หรือสะสมไม้ (Re-entry)
+        if action in ["BUY", "SELL"]:
+            qty = float(data.get("amount", 0))
+            lev = int(data.get("leverage", 1))
+            
+            # กำหนดฝั่งตาม Hedge Mode
+            pos_side = "LONG" if action == "BUY" else "SHORT"
+            opp_side = "SHORT" if action == "BUY" else "LONG"
 
-            # เช็คว่าถ้า 'สัญญาณใหม่' ไม่ตรงกับ 'ฝั่งที่ถืออยู่' (Reverse)
-            # ต้องล้างพอร์ตให้เป็น 0 ก่อนเสมอ เพื่อป้องกันการลด Lot
-            if symbol in last_side and last_side[symbol] is not None and last_side[symbol] != action:
-                print(f"🔄 Signal Switch: {last_side[symbol]} -> {action}. Clearing first...")
-                force_clear_position(symbol)
-
-            # เปิดไม้ (ถ้าฝั่งเดิมจะเป็นการสะสมไม้/Re-entry)
+            # 1. ล้างฝั่งตรงข้ามก่อนเสมอ (เพื่อรองรับการสลับหน้าเทรด)
+            close_all_by_side(symbol, opp_side)
+            
+            # 2. ปรับ Leverage
+            client.futures_change_leverage(symbol=symbol, leverage=lev)
+            
+            # 3. เปิดออเดอร์ (ถ้าฝั่งเดิมจะเป็นการเพิ่ม Lot สะสม)
+            side = SIDE_BUY if action == "BUY" else SIDE_SELL
             client.futures_create_order(
                 symbol=symbol,
-                side=SIDE_BUY if action == "BUY" else SIDE_SELL,
+                side=side,
                 type=ORDER_TYPE_MARKET,
-                quantity=qty
+                quantity=qty,
+                positionSide=pos_side
             )
-            last_side[symbol] = action
+            print(f"✅ {action} Executed (Re-entry supported)")
             return jsonify({"status": "success"}), 200
 
     except Exception as e:
-        print(f"❌ Webhook Error: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 400
+        print(f"❌ Error: {str(e)}")
+        if "Timestamp" in str(e):
+            sync_time()
+        return jsonify({"error": str(e)}), 400
+
+@app.route("/")
+def health():
+    return "Bot is running", 200
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
