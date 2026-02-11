@@ -2,11 +2,7 @@ from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
 from dotenv import load_dotenv
-import os
-import time
-import random
-import threading
-import json
+import os, time, random, threading, json
 
 # ================= ENV =================
 load_dotenv()
@@ -101,28 +97,33 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points, price):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        # แก้ตรงนี้ให้รองรับ string JSON จาก TradingView
-        raw = request.data.decode("utf-8")
-        print("Raw data received:", raw)
-        data = json.loads(raw)  # แปลง string เป็น JSON
+        raw = request.data.decode("utf-8")  # รับ string จาก TV
+        print("Raw data:", raw)
+        data = json.loads(raw)               # แปลงเป็น JSON
 
-        action = data.get("action")
-        if action != "OPEN":
+        # ตรวจ field
+        required_fields = ["action","side","symbol","amount","leverage","sl_points","tp_points","price"]
+        for f in required_fields:
+            if f not in data:
+                return jsonify({"error": f"missing {f}"}), 400
+
+        if data["action"] != "OPEN":
             return jsonify({"error": "Only OPEN action supported"}), 400
 
-        symbol = data["symbol"]
-        side = data["side"]
-        qty = float(data["amount"])
-        leverage = int(data["leverage"])
-        sl_points = float(data["sl_points"])
-        tp_points = float(data["tp_points"])
-        price = float(data["price"])
+        open_position(
+            symbol=data["symbol"],
+            side=data["side"],
+            qty=float(data["amount"]),
+            leverage=int(data["leverage"]),
+            sl_points=float(data["sl_points"]),
+            tp_points=float(data["tp_points"]),
+            price=float(data["price"])
+        )
 
-        open_position(symbol, side, qty, leverage, sl_points, tp_points, price)
         return jsonify({"status": "opened"})
 
     except Exception as e:
-        print("❌ ERROR parsing JSON or opening order:", e)
+        print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
 
 # ================= TEST ROUTE =================
