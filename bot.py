@@ -17,6 +17,18 @@ client.FUTURES_URL = "https://fapi.binance.com/fapi"
 
 # ================= TIME SYNC =================
 def sync_time():
+    DEFAULT_SYMBOL = "XPTUSDT"
+DEFAULT_LEVERAGE = 50
+
+try:
+    client.futures_change_leverage(
+        symbol=DEFAULT_SYMBOL,
+        leverage=DEFAULT_LEVERAGE
+    )
+    print("✅ Leverage set on startup")
+except Exception as e:
+    print("Leverage setup error:", e)
+
     try:
         server_time = client.get_server_time()["serverTime"]
         local_time = int(time.time() * 1000)
@@ -93,13 +105,7 @@ def webhook():
         # ================= OPEN =================
         if action == "OPEN":
             qty = float(data.get("amount"))
-            leverage = int(data.get("leverage", 10))
-
-            # set leverage (จะ call เฉพาะตอนเปิด)
-            client.futures_change_leverage(
-                symbol=symbol,
-                leverage=leverage
-            )
+        
 
             order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
