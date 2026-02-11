@@ -7,12 +7,13 @@ from dotenv import load_dotenv
 load_dotenv()
 app = Flask(__name__)
 
-# ตั้งค่า Client
+# เชื่อมต่อ API (ดึงจาก Env)
 client = Client(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"))
-# เปลี่ยนเป็น https://fapi.binance.com สำหรับพอร์ตจริง
+# สำหรับ Testnet ใช้ URL นี้ / ถ้าพอร์ตจริงเปลี่ยนเป็น https://fapi.binance.com
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
 def sync_time():
+    """ซิงค์เวลาป้องกัน Error 1021"""
     try:
         server_time = client.get_server_time()["serverTime"]
         client.timestamp_offset = server_time - int(time.time() * 1000)
@@ -20,31 +21,34 @@ def sync_time():
 
 sync_time()
 
-def close_all_by_side(symbol, pos_side):
+def force_close_side(symbol, pos_side):
     """
-    ฟังก์ชันปิดสถานะตามฝั่ง (Hedge Mode)
-    ถ้าปิด LONG ต้องส่ง SELL | ถ้าปิด SHORT ต้องส่ง BUY
+    เช็คหน้าตักจริงและสั่งปิดสถานะฝั่งที่ระบุ (Hedge Mode)
+    เรียก API เฉพาะเมื่อได้รับสัญญาณปิด เพื่อประหยัดโควตา
     """
     try:
         positions = client.futures_position_information(symbol=symbol)
         for p in positions:
-            if p["positionSide"] == pos_side:
-                amt = abs(float(p["positionAmt"]))
+            # ตรวจสอบเหรียญและฝั่ง (LONG/SHORT)
+            if p['symbol'] == symbol and p['positionSide'] == pos_side:
+                amt = abs(float(p['positionAmt']))
                 if amt > 0:
-                    # หัวใจสำคัญ: Side ต้องตรงข้ามกับ PositionSide
+                    # Hedge Mode กฎคือ: ปิด LONG ใช้ SELL / ปิด SHORT ใช้ BUY
                     side_to_send = SIDE_SELL if pos_side == "LONG" else SIDE_BUY
+                    
+                    print(f"⚠️ บังคับปิด {pos_side}: จำนวน {amt} units")
                     client.futures_create_order(
                         symbol=symbol,
                         side=side_to_send,
                         type=ORDER_TYPE_MARKET,
                         quantity=amt,
                         positionSide=pos_side,
-                        reduceOnly=True # ยืนยันว่าเป็นการปิดเท่านั้น
+                        reduceOnly=True
                     )
-                    print(f"🧹 ล้าง {pos_side} สำเร็จ: {amt}")
+        # เคลียร์ออเดอร์ค้าง (SL/TP)
         client.futures_cancel_all_open_orders(symbol=symbol)
     except Exception as e:
-        print(f"❌ Error Closing {pos_side}: {e}")
+        print(f"❌ Error ในการปิด {pos_side}: {e}")
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -54,46 +58,47 @@ def webhook():
     action = data.get("action", "").upper()
     symbol = data.get("symbol")
     
+    print(f"📩 สัญญาณเข้า: {action} | เหรียญ: {symbol}")
+
     try:
-        # --- 1. คำสั่ง CLOSE ---
+        # --- 1. คำสั่ง CLOSE (ล้างพอร์ต) ---
         if action == "CLOSE":
-            close_all_by_side(symbol, "LONG")
-            close_all_by_side(symbol, "SHORT")
-            return jsonify({"status": "closed_all"}), 200
+            force_close_side(symbol, "LONG")
+            force_close_side(symbol, "SHORT")
+            return jsonify({"status": "force_closed_all"}), 200
         
         elif action == "CLOSE_LONG":
-            close_all_by_side(symbol, "LONG")
+            force_close_side(symbol, "LONG")
             return jsonify({"status": "closed_long"}), 200
-            
+
         elif action == "CLOSE_SHORT":
-            close_all_by_side(symbol, "SHORT")
+            force_close_side(symbol, "SHORT")
             return jsonify({"status": "closed_short"}), 200
 
-        # --- 2. คำสั่ง BUY / SELL (รองรับสลับฝั่ง + สะสมไม้) ---
+        # --- 2. คำสั่ง BUY / SELL (สลับฝั่ง + สะสมไม้) ---
         elif action in ["BUY", "SELL"]:
             qty = float(data.get("amount", 0))
-            lev = int(data.get("leverage", 1))
+            lev = int(data.get("leverage", 50))
             
-            # กำหนดเป้าหมาย
-            target_pos_side = "LONG" if action == "BUY" else "SHORT"
-            opp_pos_side = "SHORT" if action == "BUY" else "LONG"
+            target_side = "LONG" if action == "BUY" else "SHORT"
+            opp_side = "SHORT" if action == "BUY" else "LONG"
             order_side = SIDE_BUY if action == "BUY" else SIDE_SELL
 
-            # ปรับ Leverage ก่อน
+            # ปรับ Leverage (API 1 Weight)
             client.futures_change_leverage(symbol=symbol, leverage=lev)
 
-            # สั่งล้างฝั่งตรงข้ามก่อนเสมอ (สลับหน้าเทรด)
-            close_all_by_side(symbol, opp_pos_side)
+            # เช็คและล้างฝั่งตรงข้ามก่อนเปิดไม้ใหม่ (ป้องกัน Lot ลด)
+            force_close_side(symbol, opp_side)
 
-            # เปิดไม้ใหม่ หรือ เพิ่มไม้ (Re-entry)
+            # ส่งคำสั่งเปิด/เพิ่มไม้ (API 1 Weight)
             client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
                 type=ORDER_TYPE_MARKET,
                 quantity=qty,
-                positionSide=target_pos_side
+                positionSide=target_side
             )
-            print(f"✅ {action} Executed: {qty} on {target_pos_side}")
+            print(f"✅ ยิง {action} สำเร็จ | ฝั่ง: {target_side} | จำนวน: {qty}")
             return jsonify({"status": "success"}), 200
 
     except Exception as e:
