@@ -4,10 +4,10 @@ from binance.enums import *
 from dotenv import load_dotenv
 import os
 import time
-import threading
 
 # ================= ENV =================
 load_dotenv()
+
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
@@ -15,28 +15,12 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
-# ===== HARD SYNC TIME (แก้ -1021) =====
+# ===== HARD SYNC TIME (ตัวนี้แหละที่หาย -1021) =====
 server_time = client.get_server_time()["serverTime"]
 local_time = int(time.time() * 1000)
 client.timestamp_offset = server_time - local_time
 
 app = Flask(__name__)
-
-# ================= ORDER COOLDOWN =================
-ORDER_DELAY = 2  # วินาที
-last_order_time = 0
-lock = threading.Lock()
-
-def wait_order_delay():
-    global last_order_time
-    with lock:
-        now = time.time()
-        elapsed = now - last_order_time
-        if elapsed < ORDER_DELAY:
-            wait_time = ORDER_DELAY - elapsed
-            print(f"⏳ Waiting {wait_time:.2f}s before sending order...")
-            time.sleep(wait_time)
-        last_order_time = time.time()
 
 # ================= UTILS =================
 def get_position(symbol, position_side):
@@ -56,7 +40,7 @@ def webhook():
         action = data.get("action")
         symbol = data["symbol"]
 
-        # ===== CLOSE POSITION =====
+        # ===== CLOSE POSITION (100%) =====
         if action == "CLOSE":
             side = data["side"]
             position_side = "LONG" if side == "BUY" else "SHORT"
@@ -67,8 +51,6 @@ def webhook():
                 return jsonify({"status": "no position to close"})
 
             qty = abs(float(pos["positionAmt"]))
-
-            wait_order_delay()  # 🔥 เพิ่มดีเลก่อนยิงออเดอร์
 
             order = client.futures_create_order(
                 symbol=symbol,
@@ -94,8 +76,6 @@ def webhook():
                 leverage=leverage
             )
 
-            wait_order_delay()  # 🔥 เพิ่มดีเลก่อนยิงออเดอร์
-
             order = client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
@@ -111,6 +91,7 @@ def webhook():
     except Exception as e:
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
+
 
 # ================= RUN =================
 if __name__ == "__main__":
