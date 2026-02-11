@@ -6,6 +6,7 @@ import os
 import time
 import random
 import threading
+import json
 
 # ================= ENV =================
 load_dotenv()
@@ -49,8 +50,8 @@ def cooldown_delay():
 
 # ================= UTILS =================
 def open_position(symbol, side, qty, leverage, sl_points, tp_points, price):
-    position_side = "LONG" if side == "BUY" else "SHORT"
-    order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
+    position_side = "LONG" if side.upper() == "BUY" else "SHORT"
+    order_side = SIDE_BUY if side.upper() == "BUY" else SIDE_SELL
 
     if qty <= 0:
         print("⚠ Quantity too small")
@@ -60,7 +61,7 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points, price):
     human_delay()
     cooldown_delay()
 
-    # เปิด order
+    # เปิด order market
     order = client.futures_create_order(
         symbol=symbol,
         side=order_side,
@@ -71,17 +72,19 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points, price):
     print(f"✅ Opened {side} {qty} {symbol} at {price}")
 
     # คำนวณ SL/TP เป็นราคาจริง
-    if side == "BUY":
+    if side.upper() == "BUY":
         sl_price = price - sl_points
         tp_price = price + tp_points
+        stop_side = SIDE_SELL
     else:
         sl_price = price + sl_points
         tp_price = price - tp_points
+        stop_side = SIDE_BUY
 
     try:
         client.futures_create_oco_order(
             symbol=symbol,
-            side=SIDE_SELL if side=="BUY" else SIDE_BUY,
+            side=stop_side,
             quantity=qty,
             price=tp_price,
             stopPrice=sl_price,
@@ -97,9 +100,12 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points, price):
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json(force=True)
-    print("📩 Received:", data)
     try:
+        # แก้ตรงนี้ให้รองรับ string JSON จาก TradingView
+        raw = request.data.decode("utf-8")
+        print("Raw data received:", raw)
+        data = json.loads(raw)  # แปลง string เป็น JSON
+
         action = data.get("action")
         if action != "OPEN":
             return jsonify({"error": "Only OPEN action supported"}), 400
@@ -116,12 +122,14 @@ def webhook():
         return jsonify({"status": "opened"})
 
     except Exception as e:
-        print("❌ ERROR:", e)
+        print("❌ ERROR parsing JSON or opening order:", e)
         return jsonify({"error": str(e)}), 400
 
+# ================= TEST ROUTE =================
 @app.route("/test")
 def test():
     return "Bot working"
 
+# ================= RUN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
