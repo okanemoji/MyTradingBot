@@ -7,58 +7,46 @@ import time
 import random
 import threading
 
-
 # ================= ENV =================
 load_dotenv()
-
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 # ================= CLIENT =================
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
-print("Server Time:", client.get_server_time())
-
-
-# ===== HARD SYNC TIME (ตัวนี้แหละที่หาย -1021) =====
+# Hard sync server time
 server_time = client.get_server_time()["serverTime"]
 local_time = int(time.time() * 1000)
 client.timestamp_offset = server_time - local_time
 
+# ================= FLASK =================
 app = Flask(__name__)
 
-# ================= HUMAN LIKE DELAY =================
+# ================= HUMAN-LIKE DELAY =================
 MIN_REACTION = 1      # วินาที
 MAX_REACTION = 5
-
-MIN_COOLDOWN = 2      # อย่างน้อย 2 วิ
-MAX_COOLDOWN = 3.5    # สุ่มเพิ่มนิดหน่อย
-
+MIN_COOLDOWN = 2      # วินาที
+MAX_COOLDOWN = 3.5
 last_order_time = 0
 lock = threading.Lock()
 
 def human_delay():
-    # 1️⃣ Reaction time หลังได้สัญญาณ
     reaction = random.uniform(MIN_REACTION, MAX_REACTION)
     print(f"🧠 Human reaction delay: {reaction:.2f}s")
     time.sleep(reaction)
 
 def cooldown_delay():
-    # 2️⃣ Cooldown กันยิงถี่
     global last_order_time
     with lock:
         now = time.time()
         elapsed = now - last_order_time
-
         random_cooldown = random.uniform(MIN_COOLDOWN, MAX_COOLDOWN)
-
         if elapsed < random_cooldown:
             wait_time = random_cooldown - elapsed
             print(f"⏳ Cooldown delay: {wait_time:.2f}s")
             time.sleep(wait_time)
-
         last_order_time = time.time()
-
 
 # ================= UTILS =================
 def get_position(symbol, position_side):
@@ -68,68 +56,102 @@ def get_position(symbol, position_side):
             return p
     return None
 
+# ================= OPEN POSITION =================
+def open_position(symbol, side, qty, leverage, sl_points, tp_points):
+    position_side = "LONG" if side == "BUY" else "SHORT"
+    order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
+
+    if qty <= 0:
+        print("⚠ Quantity too small")
+        return None
+
+    # set leverage
+    client.futures_change_leverage(symbol=symbol, leverage=leverage)
+
+    human_delay()
+    cooldown_delay()
+
+    # open market order
+    order = client.futures_create_order(
+        symbol=symbol,
+        side=order_side,
+        type=ORDER_TYPE_MARKET,
+        quantity=qty,
+        positionSide=position_side
+    )
+    print(f"✅ Opened {side} {qty} {symbol}")
+
+    # set SL/TP approx (MARKET price ± points)
+    price = float(client.futures_symbol_ticker(symbol=symbol)["price"])
+    if side == "BUY":
+        sl_price = price - sl_points
+        tp_price = price + tp_points
+    else:
+        sl_price = price + sl_points
+        tp_price = price - tp_points
+
+    try:
+        client.futures_create_oco_order(
+            symbol=symbol,
+            side=SIDE_SELL if side=="BUY" else SIDE_BUY,
+            quantity=qty,
+            price=tp_price,
+            stopPrice=sl_price,
+            stopLimitPrice=sl_price,
+            stopLimitTimeInForce="GTC"
+        )
+        print(f"🛡 SL/TP set: SL={sl_price}, TP={tp_price}")
+    except Exception as e:
+        print("❌ Failed to set SL/TP:", e)
+
+    return order
+
+# ================= CLOSE POSITION =================
+def close_position(symbol, side):
+    position_side = "LONG" if side == "BUY" else "SHORT"
+    close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
+
+    pos = get_position(symbol, position_side)
+    if not pos:
+        print("⚠ No position to close")
+        return None
+
+    qty = abs(float(pos["positionAmt"]))
+    human_delay()
+    cooldown_delay()
+
+    order = client.futures_create_order(
+        symbol=symbol,
+        side=close_side,
+        type=ORDER_TYPE_MARKET,
+        quantity=qty,
+        positionSide=position_side
+    )
+    print(f"❌ Closed {side} position {qty} {symbol}")
+    return order
+
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(force=True)
     print("📩 Received:", data)
-
     try:
         action = data.get("action")
         symbol = data["symbol"]
+        side = data.get("side")
+        qty = float(data.get("amount", 0))
+        leverage = int(data.get("leverage", 1))
+        sl_points = float(data.get("sl_points", 40))
+        tp_points = float(data.get("tp_points", 300))
 
-        # ===== CLOSE POSITION (100%) =====
-        if action == "CLOSE":
-            side = data["side"]
-            position_side = "LONG" if side == "BUY" else "SHORT"
-            close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
-
-            pos = get_position(symbol, position_side)
-            if not pos:
-                return jsonify({"status": "no position to close"})
-
-            qty = abs(float(pos["positionAmt"]))
-
-            human_delay()
-            cooldown_delay()
-            order = client.futures_create_order(
-                symbol=symbol,
-                side=close_side,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                positionSide=position_side
-            )
-
-            return jsonify({"status": "closed", "order": order})
-
-        # ===== OPEN POSITION =====
         if action == "OPEN":
-            side = data["side"]
-            amount = float(data["amount"])
-            leverage = int(data["leverage"])
-
-            position_side = "LONG" if side == "BUY" else "SHORT"
-            order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
-
-            client.futures_change_leverage(
-                symbol=symbol,
-                leverage=leverage
-            )
-
-            human_delay()
-            cooldown_delay()
-            order = client.futures_create_order(
-                symbol=symbol,
-                side=order_side,
-                type=ORDER_TYPE_MARKET,
-                quantity=amount,
-                positionSide=position_side
-            )
-
-            return jsonify({"status": "opened", "order": order})
-
-        return jsonify({"error": "invalid action"})
-
+            order = open_position(symbol, side, qty, leverage, sl_points, tp_points)
+            return jsonify({"status": "opened", "order": str(order)})
+        elif action == "CLOSE":
+            order = close_position(symbol, side)
+            return jsonify({"status": "closed", "order": str(order)})
+        else:
+            return jsonify({"error": "invalid action"}), 400
     except Exception as e:
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
