@@ -15,7 +15,6 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 # ================= CLIENT =================
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
-# Hard sync server time
 server_time = client.get_server_time()["serverTime"]
 local_time = int(time.time() * 1000)
 client.timestamp_offset = server_time - local_time
@@ -24,9 +23,9 @@ client.timestamp_offset = server_time - local_time
 app = Flask(__name__)
 
 # ================= HUMAN-LIKE DELAY =================
-MIN_REACTION = 1      # วินาที
+MIN_REACTION = 1
 MAX_REACTION = 5
-MIN_COOLDOWN = 2      # วินาที
+MIN_COOLDOWN = 2
 MAX_COOLDOWN = 3.5
 last_order_time = 0
 lock = threading.Lock()
@@ -65,13 +64,10 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points):
         print("⚠ Quantity too small")
         return None
 
-    # set leverage
     client.futures_change_leverage(symbol=symbol, leverage=leverage)
-
     human_delay()
     cooldown_delay()
 
-    # open market order
     order = client.futures_create_order(
         symbol=symbol,
         side=order_side,
@@ -81,7 +77,6 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points):
     )
     print(f"✅ Opened {side} {qty} {symbol}")
 
-    # set SL/TP approx (MARKET price ± points)
     price = float(client.futures_symbol_ticker(symbol=symbol)["price"])
     if side == "BUY":
         sl_price = price - sl_points
@@ -156,11 +151,9 @@ def webhook():
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
 
-# ================= TEST ROUTE =================
 @app.route("/test")
 def test():
     return "Bot working"
 
-# ================= RUN =================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
