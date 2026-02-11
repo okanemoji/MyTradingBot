@@ -4,6 +4,7 @@ from binance.enums import *
 from dotenv import load_dotenv
 import os
 import time
+import threading
 
 # ================= ENV =================
 load_dotenv()
@@ -21,17 +22,21 @@ client.timestamp_offset = server_time - local_time
 
 app = Flask(__name__)
 
-# ================= COOLDOWN =================
-last_trade_time = {}
-COOLDOWN = 20  # วินาที (เหมาะกับ TF 1m)
+# ================= ORDER COOLDOWN =================
+ORDER_DELAY = 2  # วินาที
+last_order_time = 0
+lock = threading.Lock()
 
-def can_trade(symbol):
-    now = time.time()
-    last = last_trade_time.get(symbol, 0)
-    if now - last < COOLDOWN:
-        return False
-    last_trade_time[symbol] = now
-    return True
+def wait_order_delay():
+    global last_order_time
+    with lock:
+        now = time.time()
+        elapsed = now - last_order_time
+        if elapsed < ORDER_DELAY:
+            wait_time = ORDER_DELAY - elapsed
+            print(f"⏳ Waiting {wait_time:.2f}s before sending order...")
+            time.sleep(wait_time)
+        last_order_time = time.time()
 
 # ================= UTILS =================
 def get_position(symbol, position_side):
@@ -51,9 +56,6 @@ def webhook():
         action = data.get("action")
         symbol = data["symbol"]
 
-        if not can_trade(symbol):
-            return jsonify({"status": "cooldown"})
-
         # ===== CLOSE POSITION =====
         if action == "CLOSE":
             side = data["side"]
@@ -62,17 +64,18 @@ def webhook():
 
             pos = get_position(symbol, position_side)
             if not pos:
-                return jsonify({"status": "no position"})
+                return jsonify({"status": "no position to close"})
 
             qty = abs(float(pos["positionAmt"]))
+
+            wait_order_delay()  # 🔥 เพิ่มดีเลก่อนยิงออเดอร์
 
             order = client.futures_create_order(
                 symbol=symbol,
                 side=close_side,
                 type=ORDER_TYPE_MARKET,
                 quantity=qty,
-                positionSide=position_side,
-                newClientOrderId=f"{symbol}_CLOSE_{int(time.time())}"
+                positionSide=position_side
             )
 
             return jsonify({"status": "closed", "order": order})
@@ -91,13 +94,14 @@ def webhook():
                 leverage=leverage
             )
 
+            wait_order_delay()  # 🔥 เพิ่มดีเลก่อนยิงออเดอร์
+
             order = client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
                 type=ORDER_TYPE_MARKET,
                 quantity=amount,
-                positionSide=position_side,
-                newClientOrderId=f"{symbol}_OPEN_{int(time.time())}"
+                positionSide=position_side
             )
 
             return jsonify({"status": "opened", "order": order})
