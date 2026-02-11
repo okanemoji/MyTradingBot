@@ -4,6 +4,9 @@ from binance.enums import *
 from dotenv import load_dotenv
 import os
 import time
+import random
+import threading
+
 
 # ================= ENV =================
 load_dotenv()
@@ -21,6 +24,39 @@ local_time = int(time.time() * 1000)
 client.timestamp_offset = server_time - local_time
 
 app = Flask(__name__)
+
+# ================= HUMAN LIKE DELAY =================
+MIN_REACTION = 1      # วินาที
+MAX_REACTION = 5
+
+MIN_COOLDOWN = 2      # อย่างน้อย 2 วิ
+MAX_COOLDOWN = 3.5    # สุ่มเพิ่มนิดหน่อย
+
+last_order_time = 0
+lock = threading.Lock()
+
+def human_delay():
+    # 1️⃣ Reaction time หลังได้สัญญาณ
+    reaction = random.uniform(MIN_REACTION, MAX_REACTION)
+    print(f"🧠 Human reaction delay: {reaction:.2f}s")
+    time.sleep(reaction)
+
+def cooldown_delay():
+    # 2️⃣ Cooldown กันยิงถี่
+    global last_order_time
+    with lock:
+        now = time.time()
+        elapsed = now - last_order_time
+
+        random_cooldown = random.uniform(MIN_COOLDOWN, MAX_COOLDOWN)
+
+        if elapsed < random_cooldown:
+            wait_time = random_cooldown - elapsed
+            print(f"⏳ Cooldown delay: {wait_time:.2f}s")
+            time.sleep(wait_time)
+
+        last_order_time = time.time()
+
 
 # ================= UTILS =================
 def get_position(symbol, position_side):
@@ -52,6 +88,8 @@ def webhook():
 
             qty = abs(float(pos["positionAmt"]))
 
+            human_delay()
+            cooldown_delay()
             order = client.futures_create_order(
                 symbol=symbol,
                 side=close_side,
@@ -76,6 +114,8 @@ def webhook():
                 leverage=leverage
             )
 
+            human_delay()
+            cooldown_delay()
             order = client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
