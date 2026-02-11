@@ -17,6 +17,8 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 # ================= CLIENT =================
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
+print("Server Time:", client.get_server_time())
+
 
 # ===== HARD SYNC TIME (ตัวนี้แหละที่หาย -1021) =====
 server_time = client.get_server_time()["serverTime"]
