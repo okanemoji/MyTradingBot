@@ -1,111 +1,98 @@
-import os, time
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
 from dotenv import load_dotenv
+import os
+import time
 
+# ================= ENV =================
 load_dotenv()
-app = Flask(__name__)
 
-# เชื่อมต่อ API (ดึงจาก Env)
-client = Client(os.getenv("BINANCE_API_KEY"), os.getenv("BINANCE_API_SECRET"))
-# สำหรับ Testnet ใช้ URL นี้ / ถ้าพอร์ตจริงเปลี่ยนเป็น https://fapi.binance.com
+API_KEY = os.getenv("BINANCE_API_KEY")
+API_SECRET = os.getenv("BINANCE_API_SECRET")
+
+# ================= CLIENT =================
+client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
-def sync_time():
-    """ซิงค์เวลาป้องกัน Error 1021"""
-    try:
-        server_time = client.get_server_time()["serverTime"]
-        client.timestamp_offset = server_time - int(time.time() * 1000)
-    except: pass
+# ===== HARD SYNC TIME (ตัวนี้แหละที่หาย -1021) =====
+server_time = client.get_server_time()["serverTime"]
+local_time = int(time.time() * 1000)
+client.timestamp_offset = server_time - local_time
 
-sync_time()
+app = Flask(__name__)
 
-def force_close_side(symbol, pos_side):
-    """
-    เช็คหน้าตักจริงและสั่งปิดสถานะฝั่งที่ระบุ (Hedge Mode)
-    เรียก API เฉพาะเมื่อได้รับสัญญาณปิด เพื่อประหยัดโควตา
-    """
-    try:
-        positions = client.futures_position_information(symbol=symbol)
-        for p in positions:
-            # ตรวจสอบเหรียญและฝั่ง (LONG/SHORT)
-            if p['symbol'] == symbol and p['positionSide'] == pos_side:
-                amt = abs(float(p['positionAmt']))
-                if amt > 0:
-                    # Hedge Mode กฎคือ: ปิด LONG ใช้ SELL / ปิด SHORT ใช้ BUY
-                    side_to_send = SIDE_SELL if pos_side == "LONG" else SIDE_BUY
-                    
-                    print(f"⚠️ บังคับปิด {pos_side}: จำนวน {amt} units")
-                    client.futures_create_order(
-                        symbol=symbol,
-                        side=side_to_send,
-                        type=ORDER_TYPE_MARKET,
-                        quantity=amt,
-                        positionSide=pos_side,
-                        reduceOnly=True
-                    )
-        # เคลียร์ออเดอร์ค้าง (SL/TP)
-        client.futures_cancel_all_open_orders(symbol=symbol)
-    except Exception as e:
-        print(f"❌ Error ในการปิด {pos_side}: {e}")
+# ================= UTILS =================
+def get_position(symbol, position_side):
+    positions = client.futures_position_information(symbol=symbol)
+    for p in positions:
+        if p["positionSide"] == position_side and abs(float(p["positionAmt"])) > 0:
+            return p
+    return None
 
+# ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    if not data: return jsonify({"status": "no data"}), 400
-
-    action = data.get("action", "").upper()
-    symbol = data.get("symbol")
-    
-    print(f"📩 สัญญาณเข้า: {action} | เหรียญ: {symbol}")
+    print("📩 Received:", data)
 
     try:
-        # --- 1. คำสั่ง CLOSE (ล้างพอร์ต) ---
+        action = data.get("action")
+        symbol = data["symbol"]
+
+        # ===== CLOSE POSITION (100%) =====
         if action == "CLOSE":
-            force_close_side(symbol, "LONG")
-            force_close_side(symbol, "SHORT")
-            return jsonify({"status": "force_closed_all"}), 200
-        
-        elif action == "CLOSE_LONG":
-            force_close_side(symbol, "LONG")
-            return jsonify({"status": "closed_long"}), 200
+            side = data["side"]
+            position_side = "LONG" if side == "BUY" else "SHORT"
+            close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
 
-        elif action == "CLOSE_SHORT":
-            force_close_side(symbol, "SHORT")
-            return jsonify({"status": "closed_short"}), 200
+            pos = get_position(symbol, position_side)
+            if not pos:
+                return jsonify({"status": "no position to close"})
 
-        # --- 2. คำสั่ง BUY / SELL (สลับฝั่ง + สะสมไม้) ---
-        elif action in ["BUY", "SELL"]:
-            qty = float(data.get("amount", 0))
-            lev = int(data.get("leverage", 50))
-            
-            target_side = "LONG" if action == "BUY" else "SHORT"
-            opp_side = "SHORT" if action == "BUY" else "LONG"
-            order_side = SIDE_BUY if action == "BUY" else SIDE_SELL
+            qty = abs(float(pos["positionAmt"]))
 
-            # ปรับ Leverage (API 1 Weight)
-            client.futures_change_leverage(symbol=symbol, leverage=lev)
+            order = client.futures_create_order(
+                symbol=symbol,
+                side=close_side,
+                type=ORDER_TYPE_MARKET,
+                quantity=qty,
+                positionSide=position_side
+            )
 
-            # เช็คและล้างฝั่งตรงข้ามก่อนเปิดไม้ใหม่ (ป้องกัน Lot ลด)
-            force_close_side(symbol, opp_side)
+            return jsonify({"status": "closed", "order": order})
 
-            # ส่งคำสั่งเปิด/เพิ่มไม้ (API 1 Weight)
-            client.futures_create_order(
+        # ===== OPEN POSITION =====
+        if action == "OPEN":
+            side = data["side"]
+            amount = float(data["amount"])
+            leverage = int(data["leverage"])
+
+            position_side = "LONG" if side == "BUY" else "SHORT"
+            order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
+
+            client.futures_change_leverage(
+                symbol=symbol,
+                leverage=leverage
+            )
+
+            order = client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
                 type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                positionSide=target_side
+                quantity=amount,
+                positionSide=position_side
             )
-            print(f"✅ ยิง {action} สำเร็จ | ฝั่ง: {target_side} | จำนวน: {qty}")
-            return jsonify({"status": "success"}), 200
+
+            return jsonify({"status": "opened", "order": order})
+
+        return jsonify({"error": "invalid action"})
 
     except Exception as e:
-        if "Timestamp" in str(e): sync_time()
-        print(f"❌ Webhook Error: {e}")
+        print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
 
+
+# ================= RUN =================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
