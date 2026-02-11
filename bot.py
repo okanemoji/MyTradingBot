@@ -7,7 +7,6 @@ import time
 
 # ================= ENV =================
 load_dotenv()
-
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
@@ -15,12 +14,24 @@ API_SECRET = os.getenv("BINANCE_API_SECRET")
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
-# ===== HARD SYNC TIME (ตัวนี้แหละที่หาย -1021) =====
+# ===== HARD SYNC TIME (แก้ -1021) =====
 server_time = client.get_server_time()["serverTime"]
 local_time = int(time.time() * 1000)
 client.timestamp_offset = server_time - local_time
 
 app = Flask(__name__)
+
+# ================= COOLDOWN =================
+last_trade_time = {}
+COOLDOWN = 20  # วินาที (เหมาะกับ TF 1m)
+
+def can_trade(symbol):
+    now = time.time()
+    last = last_trade_time.get(symbol, 0)
+    if now - last < COOLDOWN:
+        return False
+    last_trade_time[symbol] = now
+    return True
 
 # ================= UTILS =================
 def get_position(symbol, position_side):
@@ -40,7 +51,10 @@ def webhook():
         action = data.get("action")
         symbol = data["symbol"]
 
-        # ===== CLOSE POSITION (100%) =====
+        if not can_trade(symbol):
+            return jsonify({"status": "cooldown"})
+
+        # ===== CLOSE POSITION =====
         if action == "CLOSE":
             side = data["side"]
             position_side = "LONG" if side == "BUY" else "SHORT"
@@ -48,7 +62,7 @@ def webhook():
 
             pos = get_position(symbol, position_side)
             if not pos:
-                return jsonify({"status": "no position to close"})
+                return jsonify({"status": "no position"})
 
             qty = abs(float(pos["positionAmt"]))
 
@@ -57,7 +71,8 @@ def webhook():
                 side=close_side,
                 type=ORDER_TYPE_MARKET,
                 quantity=qty,
-                positionSide=position_side
+                positionSide=position_side,
+                newClientOrderId=f"{symbol}_CLOSE_{int(time.time())}"
             )
 
             return jsonify({"status": "closed", "order": order})
@@ -81,7 +96,8 @@ def webhook():
                 side=order_side,
                 type=ORDER_TYPE_MARKET,
                 quantity=amount,
-                positionSide=position_side
+                positionSide=position_side,
+                newClientOrderId=f"{symbol}_OPEN_{int(time.time())}"
             )
 
             return jsonify({"status": "opened", "order": order})
@@ -91,7 +107,6 @@ def webhook():
     except Exception as e:
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
-
 
 # ================= RUN =================
 if __name__ == "__main__":
