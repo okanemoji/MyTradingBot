@@ -27,25 +27,13 @@ def sync_time():
 
 sync_time()
 
+# sync ทุก 30 นาที
 def auto_sync():
     while True:
-        time.sleep(1800)  # sync ทุก 30 นาที
+        time.sleep(1800)
         sync_time()
 
 threading.Thread(target=auto_sync, daemon=True).start()
-
-# ================= SET LEVERAGE ON START =================
-DEFAULT_SYMBOL = "XPTUSDT"
-DEFAULT_LEVERAGE = 50
-
-try:
-    client.futures_change_leverage(
-        symbol=DEFAULT_SYMBOL,
-        leverage=DEFAULT_LEVERAGE
-    )
-    print("✅ Leverage set on startup")
-except Exception as e:
-    print("Leverage setup error:", e)
 
 # ================= APP =================
 app = Flask(__name__)
@@ -53,65 +41,65 @@ app = Flask(__name__)
 # ================= DUPLICATE PROTECTION =================
 last_signal_id = None
 
+# ================= UTILS =================
+def get_position(symbol):
+    positions = client.futures_position_information(symbol=symbol)
+    for p in positions:
+        if abs(float(p["positionAmt"])) > 0:
+            return p
+    return None
+
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     global last_signal_id
 
+    data = request.json
+    print("📩 Received:", data)
+
     try:
-        # ✅ แก้ 415 / header issue
-        data = request.get_json(force=True, silent=True)
-
-        if not data:
-            import json
-            raw = request.data.decode("utf-8")
-            data = json.loads(raw)
-
-        print("📩 Received:", data)
-
+        # ===== DUPLICATE CHECK =====
         signal_id = data.get("id")
-
-        # ===== Duplicate protection =====
-        if signal_id and signal_id == last_signal_id:
-            print("⚠️ Duplicate ignored")
+        if signal_id == last_signal_id:
+            print("⚠️ Duplicate signal ignored")
             return jsonify({"status": "duplicate ignored"})
-
-        if signal_id:
-            last_signal_id = signal_id
+        last_signal_id = signal_id
 
         action = data.get("action")
         symbol = data.get("symbol")
         side = data.get("side")
-        qty = float(data.get("amount", 0))
 
         if not action or not symbol:
             return jsonify({"error": "invalid payload"}), 400
 
         # ================= CLOSE =================
         if action == "CLOSE":
+            pos = get_position(symbol)
+            if not pos:
+                return jsonify({"status": "no position"})
 
-            close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
-
-            # 🔥 ถ้า qty = 0 ให้ปิดทั้ง position แทน
-            if qty <= 0:
-                position = client.futures_position_information(symbol=symbol)
-                for p in position:
-                    if float(p["positionAmt"]) != 0:
-                        qty = abs(float(p["positionAmt"]))
-                        break
+            qty = abs(float(pos["positionAmt"]))
+            close_side = SIDE_SELL if float(pos["positionAmt"]) > 0 else SIDE_BUY
 
             order = client.futures_create_order(
                 symbol=symbol,
                 side=close_side,
                 type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                reduceOnly=True
+                quantity=qty
             )
 
             return jsonify({"status": "closed", "orderId": order["orderId"]})
 
         # ================= OPEN =================
         if action == "OPEN":
+            qty = float(data.get("amount"))
+            leverage = int(data.get("leverage", 10))
+
+            # set leverage (จะ call เฉพาะตอนเปิด)
+            client.futures_change_leverage(
+                symbol=symbol,
+                leverage=leverage
+            )
 
             order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
@@ -131,3 +119,7 @@ def webhook():
         print("❌ ERROR DETAIL:", e)
         return jsonify({"error": str(e)}), 400
 
+
+# ================= RUN =================
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)
