@@ -71,7 +71,7 @@ def get_position(symbol, position_side):
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
+    data = request.get_json(force=True)
     print("📩 Received:", data)
 
     try:
@@ -134,6 +134,10 @@ def webhook():
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
 
+# ================= TEST ROUTE =================
+@app.route("/test")
+def test():
+    return "Bot working"
 
 # ================= RUN =================
 if __name__ == "__main__":
