@@ -97,17 +97,17 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points, price):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     try:
-        raw = request.data.decode("utf-8")  # รับ string จาก TV
+        raw = request.data.decode("utf-8").strip()  # decode text/plain จาก TV
         print("Raw data:", raw)
-        data = json.loads(raw)               # แปลงเป็น JSON
+        data = json.loads(raw)  # แปลง string เป็น JSON
+        print("Parsed JSON:", data)
 
-        # ตรวจ field
         required_fields = ["action","side","symbol","amount","leverage","sl_points","tp_points","price"]
         for f in required_fields:
             if f not in data:
                 return jsonify({"error": f"missing {f}"}), 400
 
-        if data["action"] != "OPEN":
+        if data["action"].upper() != "OPEN":
             return jsonify({"error": "Only OPEN action supported"}), 400
 
         open_position(
@@ -120,10 +120,10 @@ def webhook():
             price=float(data["price"])
         )
 
-        return jsonify({"status": "opened"})
+        return jsonify({"status": "ok"})
 
     except Exception as e:
-        print("❌ ERROR:", e)
+        print("❌ ERROR parsing JSON:", e)
         return jsonify({"error": str(e)}), 400
 
 # ================= TEST ROUTE =================
