@@ -58,18 +58,26 @@ last_signal_id = None
 def webhook():
     global last_signal_id
 
-    data = request.json
-    print("📩 Received:", data)
-
     try:
+        # ✅ แก้ 415 / header issue
+        data = request.get_json(force=True, silent=True)
+
+        if not data:
+            import json
+            raw = request.data.decode("utf-8")
+            data = json.loads(raw)
+
+        print("📩 Received:", data)
+
         signal_id = data.get("id")
 
-        # กัน TradingView ยิงซ้ำ
-        if signal_id == last_signal_id:
+        # ===== Duplicate protection =====
+        if signal_id and signal_id == last_signal_id:
             print("⚠️ Duplicate ignored")
             return jsonify({"status": "duplicate ignored"})
 
-        last_signal_id = signal_id
+        if signal_id:
+            last_signal_id = signal_id
 
         action = data.get("action")
         symbol = data.get("symbol")
@@ -83,6 +91,14 @@ def webhook():
         if action == "CLOSE":
 
             close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
+
+            # 🔥 ถ้า qty = 0 ให้ปิดทั้ง position แทน
+            if qty <= 0:
+                position = client.futures_position_information(symbol=symbol)
+                for p in position:
+                    if float(p["positionAmt"]) != 0:
+                        qty = abs(float(p["positionAmt"]))
+                        break
 
             order = client.futures_create_order(
                 symbol=symbol,
@@ -115,7 +131,3 @@ def webhook():
         print("❌ ERROR DETAIL:", e)
         return jsonify({"error": str(e)}), 400
 
-
-# ================= RUN =================
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
