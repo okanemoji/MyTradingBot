@@ -17,7 +17,25 @@ client.FUTURES_URL = "https://fapi.binance.com/fapi"
 
 # ================= TIME SYNC =================
 def sync_time():
-    DEFAULT_SYMBOL = "XPTUSDT"
+    try:
+        server_time = client.get_server_time()["serverTime"]
+        local_time = int(time.time() * 1000)
+        client.timestamp_offset = server_time - local_time
+        print("🕒 Time synced")
+    except Exception as e:
+        print("Time sync error:", e)
+
+sync_time()
+
+def auto_sync():
+    while True:
+        time.sleep(1800)  # sync ทุก 30 นาที
+        sync_time()
+
+threading.Thread(target=auto_sync, daemon=True).start()
+
+# ================= SET LEVERAGE ON START =================
+DEFAULT_SYMBOL = "XPTUSDT"
 DEFAULT_LEVERAGE = 50
 
 try:
@@ -29,37 +47,11 @@ try:
 except Exception as e:
     print("Leverage setup error:", e)
 
-    try:
-        server_time = client.get_server_time()["serverTime"]
-        local_time = int(time.time() * 1000)
-        client.timestamp_offset = server_time - local_time
-        print("🕒 Time synced")
-    except Exception as e:
-        print("Time sync error:", e)
-
-sync_time()
-
-# sync ทุก 30 นาที
-def auto_sync():
-    while True:
-        time.sleep(1800)
-        sync_time()
-
-threading.Thread(target=auto_sync, daemon=True).start()
-
 # ================= APP =================
 app = Flask(__name__)
 
 # ================= DUPLICATE PROTECTION =================
 last_signal_id = None
-
-# ================= UTILS =================
-def get_position(symbol):
-    positions = client.futures_position_information(symbol=symbol)
-    for p in positions:
-        if abs(float(p["positionAmt"])) > 0:
-            return p
-    return None
 
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
@@ -70,42 +62,40 @@ def webhook():
     print("📩 Received:", data)
 
     try:
-        # ===== DUPLICATE CHECK =====
         signal_id = data.get("id")
+
+        # กัน TradingView ยิงซ้ำ
         if signal_id == last_signal_id:
-            print("⚠️ Duplicate signal ignored")
+            print("⚠️ Duplicate ignored")
             return jsonify({"status": "duplicate ignored"})
+
         last_signal_id = signal_id
 
         action = data.get("action")
         symbol = data.get("symbol")
         side = data.get("side")
+        qty = float(data.get("amount", 0))
 
         if not action or not symbol:
             return jsonify({"error": "invalid payload"}), 400
 
         # ================= CLOSE =================
         if action == "CLOSE":
-            pos = get_position(symbol)
-            if not pos:
-                return jsonify({"status": "no position"})
 
-            qty = abs(float(pos["positionAmt"]))
-            close_side = SIDE_SELL if float(pos["positionAmt"]) > 0 else SIDE_BUY
+            close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
 
             order = client.futures_create_order(
                 symbol=symbol,
                 side=close_side,
                 type=ORDER_TYPE_MARKET,
-                quantity=qty
+                quantity=qty,
+                reduceOnly=True
             )
 
             return jsonify({"status": "closed", "orderId": order["orderId"]})
 
         # ================= OPEN =================
         if action == "OPEN":
-            qty = float(data.get("amount"))
-        
 
             order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
