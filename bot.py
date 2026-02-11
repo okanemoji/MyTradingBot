@@ -48,15 +48,7 @@ def cooldown_delay():
         last_order_time = time.time()
 
 # ================= UTILS =================
-def get_position(symbol, position_side):
-    positions = client.futures_position_information(symbol=symbol)
-    for p in positions:
-        if p["positionSide"] == position_side and abs(float(p["positionAmt"])) > 0:
-            return p
-    return None
-
-# ================= OPEN POSITION =================
-def open_position(symbol, side, qty, leverage, sl_points, tp_points):
+def open_position(symbol, side, qty, leverage, sl_points, tp_points, price):
     position_side = "LONG" if side == "BUY" else "SHORT"
     order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
@@ -68,6 +60,7 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points):
     human_delay()
     cooldown_delay()
 
+    # เปิด order
     order = client.futures_create_order(
         symbol=symbol,
         side=order_side,
@@ -75,9 +68,9 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points):
         quantity=qty,
         positionSide=position_side
     )
-    print(f"✅ Opened {side} {qty} {symbol}")
+    print(f"✅ Opened {side} {qty} {symbol} at {price}")
 
-    price = float(client.futures_symbol_ticker(symbol=symbol)["price"])
+    # คำนวณ SL/TP เป็นราคาจริง
     if side == "BUY":
         sl_price = price - sl_points
         tp_price = price + tp_points
@@ -101,30 +94,6 @@ def open_position(symbol, side, qty, leverage, sl_points, tp_points):
 
     return order
 
-# ================= CLOSE POSITION =================
-def close_position(symbol, side):
-    position_side = "LONG" if side == "BUY" else "SHORT"
-    close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
-
-    pos = get_position(symbol, position_side)
-    if not pos:
-        print("⚠ No position to close")
-        return None
-
-    qty = abs(float(pos["positionAmt"]))
-    human_delay()
-    cooldown_delay()
-
-    order = client.futures_create_order(
-        symbol=symbol,
-        side=close_side,
-        type=ORDER_TYPE_MARKET,
-        quantity=qty,
-        positionSide=position_side
-    )
-    print(f"❌ Closed {side} position {qty} {symbol}")
-    return order
-
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -132,21 +101,20 @@ def webhook():
     print("📩 Received:", data)
     try:
         action = data.get("action")
-        symbol = data["symbol"]
-        side = data.get("side")
-        qty = float(data.get("amount", 0))
-        leverage = int(data.get("leverage", 1))
-        sl_points = float(data.get("sl_points", 40))
-        tp_points = float(data.get("tp_points", 300))
+        if action != "OPEN":
+            return jsonify({"error": "Only OPEN action supported"}), 400
 
-        if action == "OPEN":
-            order = open_position(symbol, side, qty, leverage, sl_points, tp_points)
-            return jsonify({"status": "opened", "order": str(order)})
-        elif action == "CLOSE":
-            order = close_position(symbol, side)
-            return jsonify({"status": "closed", "order": str(order)})
-        else:
-            return jsonify({"error": "invalid action"}), 400
+        symbol = data["symbol"]
+        side = data["side"]
+        qty = float(data["amount"])
+        leverage = int(data["leverage"])
+        sl_points = float(data["sl_points"])
+        tp_points = float(data["tp_points"])
+        price = float(data["price"])
+
+        open_position(symbol, side, qty, leverage, sl_points, tp_points, price)
+        return jsonify({"status": "opened"})
+
     except Exception as e:
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
