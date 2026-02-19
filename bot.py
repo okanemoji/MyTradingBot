@@ -11,16 +11,32 @@ load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
-# ================= CLIENT =================
-client = Client(API_KEY, API_SECRET)
-
-
-# ===== SYNC TIME =====
-server_time = client.get_server_time()["serverTime"]
-local_time = int(time.time() * 1000)
-client.timestamp_offset = server_time - local_time
-
 app = Flask(__name__)
+
+# ================= SAFE CLIENT INIT =================
+client = None
+
+def init_binance():
+    global client
+    while True:
+        try:
+            client = Client(API_KEY, API_SECRET, {"timeout": 20})
+
+            # ===== SYNC TIME =====
+            server_time = client.get_server_time()["serverTime"]
+            local_time = int(time.time() * 1000)
+            client.timestamp_offset = server_time - local_time
+
+            print("✅ Binance connected & time synced")
+            break
+
+        except Exception as e:
+            print("⚠ Binance init failed:", e)
+            print("⏳ Retry in 60 sec...")
+            time.sleep(60)
+
+# รันแบบ background thread กัน block app
+threading.Thread(target=init_binance, daemon=True).start()
 
 # ================= DUPLICATE PROTECTION =================
 processed_ids = set()
@@ -32,7 +48,6 @@ def is_duplicate(order_id):
             return True
         processed_ids.add(order_id)
 
-        # จำกัด memory ไม่ให้โตเกิน
         if len(processed_ids) > 500:
             processed_ids.clear()
 
@@ -40,6 +55,8 @@ def is_duplicate(order_id):
 
 # ================= UTILS =================
 def get_position(symbol, position_side):
+    if client is None:
+        return None
     positions = client.futures_position_information(symbol=symbol)
     for p in positions:
         if p["positionSide"] == position_side and abs(float(p["positionAmt"])) > 0:
@@ -49,6 +66,11 @@ def get_position(symbol, position_side):
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    global client
+
+    if client is None:
+        return jsonify({"error": "binance not ready"}), 503
+
     data = request.json
     print("📩 Received:", data)
 
@@ -76,7 +98,7 @@ def webhook():
 
             qty = abs(float(pos["positionAmt"]))
 
-            order = client.futures_create_order(
+            client.futures_create_order(
                 symbol=symbol,
                 side=close_side,
                 type=ORDER_TYPE_MARKET,
@@ -98,7 +120,7 @@ def webhook():
 
             client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
-            order = client.futures_create_order(
+            client.futures_create_order(
                 symbol=symbol,
                 side=order_side,
                 type=ORDER_TYPE_MARKET,
@@ -115,5 +137,7 @@ def webhook():
         print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
 
+
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
