@@ -9,8 +9,8 @@ import json
 
 # ================= ENV =================
 load_dotenv()
-API_KEY = os.getenv("BINANCE_API_KEY_TESTNET")
-API_SECRET = os.getenv("BINANCE_API_SECRET_TESTNET")
+API_KEY = os.getenv("BINANCE_API_KEY")       # ใช้ชื่อเดิม
+API_SECRET = os.getenv("BINANCE_API_SECRET") # ใช้ชื่อเดิม
 
 app = Flask(__name__)
 
@@ -21,29 +21,21 @@ def init_binance():
     global client
     while True:
         try:
-            # ใช้ testnet=True
             client = Client(API_KEY, API_SECRET, {"timeout": 20}, testnet=True)
-            
-            # ===== SYNC TIME =====
             server_time = client.get_server_time()["serverTime"]
             local_time = int(time.time() * 1000)
             client.timestamp_offset = server_time - local_time
-
             print("✅ Binance Testnet connected & time synced")
             break
-
         except Exception as e:
             print("⚠ Binance init failed:", e)
-            print("⏳ Retry in 60 sec...")
-            time.sleep(60)
+            time.sleep(10)
 
-# รัน background thread กัน block app
 threading.Thread(target=init_binance, daemon=True).start()
 
 # ================= DUPLICATE PROTECTION =================
 processed_ids = set()
 lock = threading.Lock()
-
 def is_duplicate(order_id):
     with lock:
         if order_id in processed_ids:
@@ -63,19 +55,30 @@ def get_position(symbol, position_side):
             return p
     return None
 
+def ensure_client_ready():
+    timeout = 10
+    while client is None and timeout > 0:
+        print("⏳ Waiting for Binance client...")
+        time.sleep(1)
+        timeout -= 1
+    if client is None:
+        print("❌ Client still not ready")
+        return False
+    if not client.API_KEY or not client.API_SECRET:
+        print("❌ API key/secret missing")
+        return False
+    return True
+
 # ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     global client
 
-    if client is None:
-        return jsonify({"error": "binance not ready"}), 503
-
-    data_raw = request.data
-    print("📥 Raw request:", data_raw)
+    if not ensure_client_ready():
+        return jsonify({"status": "client not ready"}), 503
 
     try:
-        data = json.loads(data_raw)
+        data = json.loads(request.data)
     except Exception as e:
         print("❌ JSON decode error:", e)
         return jsonify({"error": "bad json"}), 400
@@ -96,7 +99,7 @@ def webhook():
         timestamp = data.get("timestamp", time.time() * 1000)
         print(f"💓 Heartbeat received at {timestamp}")
         try:
-            client.get_server_time()  # call lightweight API keep-alive
+            client.get_server_time()
         except Exception as e:
             print("⚠ Heartbeat API error:", e)
         return jsonify({"status": "heartbeat ok"})
@@ -140,7 +143,6 @@ def webhook():
         position_side = "LONG" if side == "BUY" else "SHORT"
         order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
-        # เปลี่ยน leverage
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
         client.futures_create_order(
