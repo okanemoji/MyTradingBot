@@ -21,17 +21,23 @@ def init_binance():
     global client
     while True:
         try:
+            # ใช้ testnet=True
             client = Client(API_KEY, API_SECRET, {"timeout": 20}, testnet=True)
+            
+            # ===== SYNC TIME =====
             server_time = client.get_server_time()["serverTime"]
             local_time = int(time.time() * 1000)
             client.timestamp_offset = server_time - local_time
+
             print("✅ Binance Testnet connected & time synced")
             break
+
         except Exception as e:
             print("⚠ Binance init failed:", e)
             print("⏳ Retry in 60 sec...")
             time.sleep(60)
 
+# รัน background thread กัน block app
 threading.Thread(target=init_binance, daemon=True).start()
 
 # ================= DUPLICATE PROTECTION =================
@@ -90,7 +96,7 @@ def webhook():
         timestamp = data.get("timestamp", time.time() * 1000)
         print(f"💓 Heartbeat received at {timestamp}")
         try:
-            client.get_server_time()  # keep-alive
+            client.get_server_time()  # call lightweight API keep-alive
         except Exception as e:
             print("⚠ Heartbeat API error:", e)
         return jsonify({"status": "heartbeat ok"})
@@ -106,6 +112,10 @@ def webhook():
             return jsonify({"status": "no position"})
 
         qty = abs(float(pos["positionAmt"]))
+
+        if not client.API_SECRET:
+            print("❌ API Secret not loaded, skipping close order")
+            return jsonify({"status": "secret missing"})
 
         client.futures_create_order(
             symbol=symbol,
@@ -123,9 +133,14 @@ def webhook():
         amount = float(data["amount"])
         leverage = int(data["leverage"])
 
+        if not client.API_SECRET:
+            print("❌ API Secret not loaded, skipping open order")
+            return jsonify({"status": "secret missing"})
+
         position_side = "LONG" if side == "BUY" else "SHORT"
         order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
+        # เปลี่ยน leverage
         client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
         client.futures_create_order(
