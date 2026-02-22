@@ -53,6 +53,20 @@ def is_duplicate(order_id):
 
         return False
 
+
+  # ===== HEARTBEAT =====
+        if action == "HEARTBEAT":
+            timestamp = data.get("timestamp", time.time() * 1000)
+            print(f"💓 Heartbeat received at {timestamp}")
+
+            # เรียก API เบาๆ แค่ keep-alive
+            try:
+                client.get_server_time()
+            except Exception as e:
+                print("⚠ Heartbeat API error:", e)
+
+            return jsonify({"status": "heartbeat ok"})
+
 # ================= UTILS =================
 def get_position(symbol, position_side):
     if client is None:
