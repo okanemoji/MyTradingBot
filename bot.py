@@ -8,8 +8,8 @@ import threading
 
 # ================= ENV =================
 load_dotenv()
-API_KEY = os.getenv("BINANCE_API_KEY")
-API_SECRET = os.getenv("BINANCE_API_SECRET")
+API_KEY = os.getenv("BINANCE_API_KEY_TESTNET")
+API_SECRET = os.getenv("BINANCE_API_SECRET_TESTNET")
 
 app = Flask(__name__)
 
@@ -20,14 +20,15 @@ def init_binance():
     global client
     while True:
         try:
-            client = Client(API_KEY, API_SECRET, {"timeout": 20})
+            # ===== Testnet endpoint =====
+            client = Client(API_KEY, API_SECRET, {"timeout": 20}, testnet=True)
 
             # ===== SYNC TIME =====
             server_time = client.get_server_time()["serverTime"]
             local_time = int(time.time() * 1000)
             client.timestamp_offset = server_time - local_time
 
-            print("✅ Binance connected & time synced")
+            print("✅ Binance Testnet connected & time synced")
             break
 
         except Exception as e:
@@ -35,7 +36,7 @@ def init_binance():
             print("⏳ Retry in 60 sec...")
             time.sleep(60)
 
-# รันแบบ background thread กัน block app
+# รัน background thread
 threading.Thread(target=init_binance, daemon=True).start()
 
 # ================= DUPLICATE PROTECTION =================
@@ -47,25 +48,9 @@ def is_duplicate(order_id):
         if order_id in processed_ids:
             return True
         processed_ids.add(order_id)
-
         if len(processed_ids) > 500:
             processed_ids.clear()
-
         return False
-
-
-  # ===== HEARTBEAT =====
-        if action == "HEARTBEAT":
-            timestamp = data.get("timestamp", time.time() * 1000)
-            print(f"💓 Heartbeat received at {timestamp}")
-
-            # เรียก API เบาๆ แค่ keep-alive
-            try:
-                client.get_server_time()
-            except Exception as e:
-                print("⚠ Heartbeat API error:", e)
-
-            return jsonify({"status": "heartbeat ok"})
 
 # ================= UTILS =================
 def get_position(symbol, position_side):
@@ -98,7 +83,20 @@ def webhook():
             return jsonify({"status": "duplicate ignored"})
 
         action = data.get("action")
-        symbol = data["symbol"]
+        symbol = data.get("symbol")
+
+        # ===== HEARTBEAT =====
+        if action == "HEARTBEAT":
+            timestamp = data.get("timestamp", time.time() * 1000)
+            print(f"💓 Heartbeat received at {timestamp}")
+
+            # เรียก API เบาๆ แค่ keep-alive
+            try:
+                client.get_server_time()
+            except Exception as e:
+                print("⚠ Heartbeat API error:", e)
+
+            return jsonify({"status": "heartbeat ok"})
 
         # ===== CLOSE =====
         if action == "CLOSE":
