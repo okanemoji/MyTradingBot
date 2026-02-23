@@ -23,8 +23,8 @@ lock = threading.Lock()
 # ===== FUNCTION: HANDLE ALERT =====
 def handle_alert(alert_json):
     alert_id = alert_json.get("id")
-    action = alert_json.get("action")
-    side = alert_json.get("side")
+    action = alert_json.get("action")  # OPEN / CLOSE
+    side = alert_json.get("side")      # BUY / SELL
     symbol = alert_json.get("symbol")
     qty = float(alert_json.get("amount", 0))
     leverage = int(alert_json.get("leverage", 1))
@@ -32,50 +32,39 @@ def handle_alert(alert_json):
     # ป้องกัน alert ซ้ำ
     with lock:
         now = time.time()
-        if alert_id in recent_alerts:
-            if now - recent_alerts[alert_id] < ALERT_COOLDOWN:
-                print(f"[INFO] Duplicate alert skipped: {alert_id}")
-                return
+        if alert_id in recent_alerts and now - recent_alerts[alert_id] < ALERT_COOLDOWN:
+            print(f"[INFO] Duplicate alert skipped: {alert_id}")
+            return
         recent_alerts[alert_id] = now
 
     def execute_order():
         try:
             print(f"[INFO] Executing alert: {alert_json}")
+
             # ตั้ง leverage
             client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
-            # เปิด/ปิด order ตาม action
+            # Hedge Mode ต้องระบุ positionSide
             if action == "OPEN":
-                if side == "BUY":
-                    client.futures_create_order(
-                        symbol=symbol,
-                        side=SIDE_BUY,
-                        type=FUTURE_ORDER_TYPE_MARKET,
-                        quantity=qty
-                    )
-                elif side == "SELL":
-                    client.futures_create_order(
-                        symbol=symbol,
-                        side=SIDE_SELL,
-                        type=FUTURE_ORDER_TYPE_MARKET,
-                        quantity=qty
-                    )
+                position_side = "LONG" if side == "BUY" else "SHORT"
+                client.futures_create_order(
+                    symbol=symbol,
+                    side=SIDE_BUY if side == "BUY" else SIDE_SELL,
+                    type=FUTURE_ORDER_TYPE_MARKET,
+                    quantity=qty,
+                    positionSide=position_side
+                )
             elif action == "CLOSE":
-                # ปิด position ด้วย opposite market order
-                if side == "BUY":
-                    client.futures_create_order(
-                        symbol=symbol,
-                        side=SIDE_SELL,
-                        type=FUTURE_ORDER_TYPE_MARKET,
-                        quantity=qty
-                    )
-                elif side == "SELL":
-                    client.futures_create_order(
-                        symbol=symbol,
-                        side=SIDE_BUY,
-                        type=FUTURE_ORDER_TYPE_MARKET,
-                        quantity=qty
-                    )
+                # ปิด position ต้องใช้ opposite side + same positionSide
+                position_side = "LONG" if side == "BUY" else "SHORT"
+                client.futures_create_order(
+                    symbol=symbol,
+                    side=SIDE_SELL if side == "BUY" else SIDE_BUY,
+                    type=FUTURE_ORDER_TYPE_MARKET,
+                    quantity=qty,
+                    positionSide=position_side
+                )
+
             print(f"[SUCCESS] Alert executed: {alert_id}")
         except Exception as e:
             print(f"[ERROR] Failed to execute alert {alert_id}: {e}")
@@ -89,7 +78,7 @@ def alert():
     if not data:
         return jsonify({"status": "error", "message": "No JSON provided"}), 400
 
-    handle_alert(data)  # ส่งจริง
+    handle_alert(data)  # ส่งจริงไป Binance
     return jsonify({"status": "ok"}), 200
 
 @app.route("/webhook", methods=["POST"])
@@ -98,7 +87,7 @@ def webhook():
     if not data:
         return jsonify({"status": "error", "message": "No JSON provided"}), 400
 
-    handle_alert(data)  # ส่งจริง
+    handle_alert(data)  # ส่งจริงไป Binance
     return jsonify({"status": "ok"}), 200
 
 # ===== RUN APP =====
