@@ -6,138 +6,105 @@ import os
 import time
 import threading
 
-# ================= ENV =================
+# ===== LOAD ENV VARIABLES =====
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
+client = Client(API_KEY, API_SECRET)
+
 app = Flask(__name__)
 
-# ================= SAFE CLIENT INIT =================
-client = None
+# ===== GLOBAL VARIABLES =====
+# เก็บ alert ที่เพิ่งส่งเข้ามาเพื่อป้องกัน duplicate
+recent_alerts = {}
+ALERT_COOLDOWN = 2  # วินาที delay ป้องกันยิงซ้ำ
 
-def init_binance():
-    global client
-    while True:
-        try:
-            client = Client(API_KEY, API_SECRET, {"timeout": 20})
-
-            # ===== SYNC TIME =====
-            server_time = client.get_server_time()["serverTime"]
-            local_time = int(time.time() * 1000)
-            client.timestamp_offset = server_time - local_time
-
-            print("✅ Binance connected & time synced")
-            break
-
-        except Exception as e:
-            print("⚠ Binance init failed:", e)
-            print("⏳ Retry in 60 sec...")
-            time.sleep(60)
-
-# รันแบบ background thread กัน block app
-threading.Thread(target=init_binance, daemon=True).start()
-
-# ================= DUPLICATE PROTECTION =================
-processed_ids = set()
 lock = threading.Lock()
 
-def is_duplicate(order_id):
+# ===== FUNCTION: HANDLE ALERT =====
+def handle_alert(alert_json):
+    """
+    alert_json ตัวอย่าง:
+    {
+      "id": "1677051234567_BUY_OPEN",
+      "action": "OPEN",
+      "side": "BUY",
+      "symbol": "XAUUSDT",
+      "amount": 1,
+      "leverage": 50
+    }
+    """
+    alert_id = alert_json.get("id")
+    action = alert_json.get("action")
+    side = alert_json.get("side")
+    symbol = alert_json.get("symbol")
+    qty = float(alert_json.get("amount", 0))
+    leverage = int(alert_json.get("leverage", 1))
+
+    # ป้องกัน alert ซ้ำ
     with lock:
-        if order_id in processed_ids:
-            return True
-        processed_ids.add(order_id)
+        now = time.time()
+        if alert_id in recent_alerts:
+            if now - recent_alerts[alert_id] < ALERT_COOLDOWN:
+                print(f"[INFO] Duplicate alert skipped: {alert_id}")
+                return
+        recent_alerts[alert_id] = now
 
-        if len(processed_ids) > 500:
-            processed_ids.clear()
-
-        return False
-
-# ================= UTILS =================
-def get_position(symbol, position_side):
-    if client is None:
-        return None
-    positions = client.futures_position_information(symbol=symbol)
-    for p in positions:
-        if p["positionSide"] == position_side and abs(float(p["positionAmt"])) > 0:
-            return p
-    return None
-
-# ================= WEBHOOK =================
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    global client
-
-    if client is None:
-        return jsonify({"error": "binance not ready"}), 503
-
-    data = request.json
-    print("📩 Received:", data)
-
-    try:
-        order_id = data.get("id")
-        if not order_id:
-            return jsonify({"error": "missing id"}), 400
-
-        if is_duplicate(order_id):
-            print("⚠ Duplicate blocked:", order_id)
-            return jsonify({"status": "duplicate ignored"})
-
-        action = data.get("action")
-        symbol = data["symbol"]
-
-        # ===== CLOSE =====
-        if action == "CLOSE":
-            side = data["side"]
-            position_side = "LONG" if side == "BUY" else "SHORT"
-            close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
-
-            pos = get_position(symbol, position_side)
-            if not pos:
-                return jsonify({"status": "no position"})
-
-            qty = abs(float(pos["positionAmt"]))
-
-            client.futures_create_order(
-                symbol=symbol,
-                side=close_side,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                positionSide=position_side,
-                newClientOrderId=order_id
-            )
-
-            return jsonify({"status": "closed"})
-
-        # ===== OPEN =====
-        if action == "OPEN":
-            side = data["side"]
-            amount = float(data["amount"])
-            leverage = int(data["leverage"])
-
-            position_side = "LONG" if side == "BUY" else "SHORT"
-            order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
-
+    # เรียก Binance API ใน thread แยก (non-blocking)
+    def execute_order():
+        try:
+            print(f"[INFO] Executing alert: {alert_json}")
+            # ตั้ง leverage สำหรับ symbol
             client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
-            client.futures_create_order(
-                symbol=symbol,
-                side=order_side,
-                type=ORDER_TYPE_MARKET,
-                quantity=amount,
-                positionSide=position_side,
-                newClientOrderId=order_id
-            )
+            if action == "OPEN":
+                if side == "BUY":
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side=SIDE_BUY,
+                        type=FUTURE_ORDER_TYPE_MARKET,
+                        quantity=qty
+                    )
+                elif side == "SELL":
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side=SIDE_SELL,
+                        type=FUTURE_ORDER_TYPE_MARKET,
+                        quantity=qty
+                    )
+            elif action == "CLOSE":
+                # ปิด position: ใช้วิธี opposite market order
+                if side == "BUY":
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side=SIDE_SELL,
+                        type=FUTURE_ORDER_TYPE_MARKET,
+                        quantity=qty
+                    )
+                elif side == "SELL":
+                    client.futures_create_order(
+                        symbol=symbol,
+                        side=SIDE_BUY,
+                        type=FUTURE_ORDER_TYPE_MARKET,
+                        quantity=qty
+                    )
+            print(f"[SUCCESS] Alert executed: {alert_id}")
+        except Exception as e:
+            print(f"[ERROR] Failed to execute alert {alert_id}: {e}")
 
-            return jsonify({"status": "opened"})
+    threading.Thread(target=execute_order).start()
 
-        return jsonify({"error": "invalid action"})
+# ===== FLASK ROUTE =====
+@app.route("/alert", methods=["POST"])
+def alert():
+    data = request.get_json()
+    if not data:
+        return jsonify({"status": "error", "message": "No JSON provided"}), 400
 
-    except Exception as e:
-        print("❌ ERROR:", e)
-        return jsonify({"error": str(e)}), 400
+    handle_alert(data)
+    return jsonify({"status": "ok"}), 200
 
-
+# ===== RUN APP =====
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
