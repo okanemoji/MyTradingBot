@@ -6,22 +6,45 @@ import os
 import time
 import threading
 
-# ===== ENV =====
+# ================= CONFIG =================
+SYMBOL = "XAUUSDT"
+LEVERAGE = 50
+
+# ================= ENV =================
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
-client = Client(API_KEY, API_SECRET)
-client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
-
-# ===== SYNC TIME (ครั้งเดียวพอ) =====
-server_time = client.get_server_time()["serverTime"]
-local_time = int(time.time() * 1000)
-client.timestamp_offset = server_time - local_time
-
 app = Flask(__name__)
 
-# ===== DUPLICATE PROTECTION =====
+client = None
+
+# ================= SAFE INIT =================
+def init_binance():
+    global client
+    while True:
+        try:
+            client = Client(API_KEY, API_SECRET, {"timeout": 20})
+
+            # sync time
+            server_time = client.get_server_time()["serverTime"]
+            local_time = int(time.time() * 1000)
+            client.timestamp_offset = server_time - local_time
+
+            # set leverage once
+            client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
+
+            print("✅ Binance connected (One-way mode)")
+            break
+
+        except Exception as e:
+            print("⚠ Binance init failed:", e)
+            print("⏳ Retry in 60 sec...")
+            time.sleep(60)
+
+threading.Thread(target=init_binance, daemon=True).start()
+
+# ================= DUPLICATE =================
 processed_ids = set()
 lock = threading.Lock()
 
@@ -30,79 +53,82 @@ def is_duplicate(order_id):
         if order_id in processed_ids:
             return True
         processed_ids.add(order_id)
-
-        if len(processed_ids) > 1000:
+        if len(processed_ids) > 500:
             processed_ids.clear()
-
         return False
 
-# ===== TRACK LEVERAGE PER SYMBOL =====
-symbol_leverage = {}
+# ================= POSITION =================
+def get_position_amt():
+    positions = client.futures_position_information(symbol=SYMBOL)
+    for p in positions:
+        amt = float(p["positionAmt"])
+        if amt != 0:
+            return amt
+    return 0
 
+# ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
+    global client
+
+    if client is None:
+        return jsonify({"error": "binance not ready"}), 503
+
     data = request.json
+    print("📩 Received:", data)
 
     try:
         order_id = data.get("id")
+        action = data.get("action")
+
         if not order_id:
             return jsonify({"error": "missing id"}), 400
 
         if is_duplicate(order_id):
             return jsonify({"status": "duplicate ignored"})
 
-        action = data["action"]
-        symbol = data["symbol"]
-        side = data["side"]
-
-        position_side = "LONG" if side == "BUY" else "SHORT"
-        order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
-
         # ===== OPEN =====
         if action == "OPEN":
-            amount = float(data["amount"])
-            leverage = int(data["leverage"])
+            side = data["side"]
+            qty = float(data["amount"])
 
-            # เปลี่ยน leverage เฉพาะตอนยังไม่เคยตั้ง
-            if symbol not in symbol_leverage:
-                client.futures_change_leverage(symbol=symbol, leverage=leverage)
-                symbol_leverage[symbol] = leverage
+            order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
             client.futures_create_order(
-                symbol=symbol,
+                symbol=SYMBOL,
                 side=order_side,
                 type=ORDER_TYPE_MARKET,
-                quantity=amount,
-                positionSide=position_side,
-                newClientOrderId=order_id,
-                recvWindow=5000
+                quantity=qty
             )
 
             return jsonify({"status": "opened"})
 
-        # ===== CLOSE (ไม่ query position) =====
+        # ===== CLOSE =====
         if action == "CLOSE":
+            amt = get_position_amt()
+
+            if amt == 0:
+                return jsonify({"status": "no position"})
+
+            close_side = SIDE_SELL if amt > 0 else SIDE_BUY
 
             client.futures_create_order(
-                symbol=symbol,
-                side=SIDE_SELL if side == "BUY" else SIDE_BUY,
+                symbol=SYMBOL,
+                side=close_side,
                 type=ORDER_TYPE_MARKET,
-                quantity=float(data.get("amount", 0)),  # optional
-                positionSide=position_side,
-                reduceOnly=True,
-                newClientOrderId=order_id,
-                recvWindow=5000
+                quantity=abs(amt),
+                reduceOnly=True
             )
 
             return jsonify({"status": "closed"})
 
         return jsonify({"error": "invalid action"})
 
-   except Exception as e:
-    print("ERROR >>>", e)
-    print("DATA >>>", data)
-    return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        print("❌ ERROR:", e)
+        return jsonify({"error": str(e)}), 400
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
