@@ -98,8 +98,10 @@ def webhook():
 
         return jsonify({"error": "invalid action"})
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 400
+   except Exception as e:
+    print("ERROR >>>", e)
+    print("DATA >>>", data)
+    return jsonify({"error": str(e)}), 400
 
 
 if __name__ == "__main__":
