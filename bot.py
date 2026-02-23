@@ -1,24 +1,33 @@
-import os
-import json
-import threading
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
 from dotenv import load_dotenv
+import os
+import time
+import threading
 
-# ================= การตั้งค่า (Configuration) =================
+# ================= ENV =================
 load_dotenv()
+
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
-# เปลี่ยนเป็น False เมื่อต้องการรันบนบัญชีจริง (Real Account)
-USE_TESTNET = True 
+TESTNET = os.getenv("TESTNET", "true").lower() == "true"
 
+# ================= CLIENT =================
+client = Client(API_KEY, API_SECRET)
+
+if TESTNET:
+    client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
+
+# ===== SYNC TIME =====
+server_time = client.get_server_time()["serverTime"]
+local_time = int(time.time() * 1000)
+client.timestamp_offset = server_time - local_time
+
+# ================= APP =================
 app = Flask(__name__)
 
-# ================= เชื่อมต่อ BINANCE =================
-client = Client(API_KEY, API_SECRET, testnet=USE_TESTNET)
-
-# ================= ระบบป้องกันคำสั่งซ้ำ (Duplicate Protection) =================
+# ================= DUPLICATE PROTECTION =================
 processed_ids = set()
 lock = threading.Lock()
 
@@ -27,92 +36,95 @@ def is_duplicate(order_id):
         if order_id in processed_ids:
             return True
         processed_ids.add(order_id)
-        if len(processed_ids) > 1000:
+        if len(processed_ids) > 500:
             processed_ids.clear()
         return False
 
-# ================= ฟังก์ชันเช็คสถานะออเดอร์ค้าง (Utils) =================
-def get_position_amt(symbol, side):
-    try:
-        positions = client.futures_position_information(symbol=symbol)
-        pos_side = "LONG" if side == "BUY" else "SHORT"
-        for p in positions:
-            if p["positionSide"] == pos_side:
-                return abs(float(p["positionAmt"]))
-    except Exception as e:
-        print(f"Error fetching position: {e}")
-    return 0
+# ================= GET POSITION =================
+def get_position(symbol, position_side):
+    positions = client.futures_position_information(symbol=symbol)
+    for p in positions:
+        if p["positionSide"] == position_side and abs(float(p["positionAmt"])) > 0:
+            return p
+    return None
 
-# ================= WEBHOOK (จุดรับสัญญาณ) =================
+# ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    # 1. ดักจับข้อมูลดิบเพื่อตรวจสอบ (Debug)
-    raw_body = request.get_data(as_text=True)
-    print(f"--- [ได้รับสัญญาณใหม่] ---")
-    print(f"ข้อมูลที่ส่งมา: {raw_body}")
+    data = request.json
+    print("📩 Received:", data)
 
     try:
-        # 2. แปลงข้อมูลเป็น JSON
-        if request.is_json:
-            data = request.json
-        else:
-            data = json.loads(raw_body)
+        order_id = data.get("id")
+        if not order_id:
+            return jsonify({"error": "missing id"}), 400
 
-        # 3. ตรวจสอบ ID ซ้ำ
-        order_id = str(data.get("id", "no_id"))
         if is_duplicate(order_id):
-            print(f"⚠ ข้ามสัญญาณ: ID {order_id} ถูกประมวลผลไปแล้ว")
-            return jsonify({"status": "duplicate"}), 200
+            print("⚠ Duplicate blocked:", order_id)
+            return jsonify({"status": "duplicate ignored"})
 
-        # 4. ดึงค่าพารามิเตอร์ต่างๆ
-        action = data.get("action")   # OPEN หรือ CLOSE
-        side = data.get("side")       # BUY หรือ SELL
-        symbol = data.get("symbol")
-        qty = float(data.get("amount", 0))
-        leverage = int(data.get("leverage", 20))
-        pos_side = "LONG" if side == "BUY" else "SHORT"
+        action = data.get("action")
+        symbol = data["symbol"]
 
-        # 5. ประมวลผลคำสั่ง OPEN
-        if action == "OPEN":
-            print(f"🚀 กำลังเปิด {pos_side} สำหรับ {symbol}...")
-            client.futures_change_leverage(symbol=symbol, leverage=leverage)
-            order = client.futures_create_order(
+        # ================= CLOSE =================
+        if action == "CLOSE":
+            side = data["side"]
+
+            position_side = "LONG" if side == "BUY" else "SHORT"
+            close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
+
+            pos = get_position(symbol, position_side)
+            if not pos:
+                return jsonify({"status": "no position"})
+
+            qty = abs(float(pos["positionAmt"]))
+
+            client.futures_create_order(
                 symbol=symbol,
-                side=SIDE_BUY if side == "BUY" else SIDE_SELL,
-                positionSide=pos_side,
+                side=close_side,
                 type=ORDER_TYPE_MARKET,
-                quantity=qty
+                quantity=qty,
+                positionSide=position_side,
+                reduceOnly=True,
+                newClientOrderId=order_id
             )
-            print(f"✅ สำเร็จ: {order_id}")
-            return jsonify({"status": "opened", "order_id": order_id}), 200
 
-        # 6. ประมวลผลคำสั่ง CLOSE
-        elif action == "CLOSE":
-            print(f"🛑 กำลังปิด {pos_side} สำหรับ {symbol}...")
-            current_qty = get_position_amt(symbol, side)
-            if current_qty > 0:
-                order = client.futures_create_order(
-                    symbol=symbol,
-                    side=SIDE_SELL if side == "BUY" else SIDE_BUY,
-                    positionSide=pos_side,
-                    type=ORDER_TYPE_MARKET,
-                    quantity=current_qty
-                )
-                print(f"✅ ปิดออเดอร์สำเร็จ: {order_id}")
-                return jsonify({"status": "closed", "order_id": order_id}), 200
-            else:
-                print(f"⚠ ไม่มี Position ค้างอยู่ให้ปิด")
-                return jsonify({"status": "no_position_to_close"}), 200
+            return jsonify({"status": "closed"})
 
-        # 7. กรณี Action ไม่ถูกต้อง
-        else:
-            print(f"❌ Action ไม่ถูกต้อง: {action}")
-            return jsonify({"status": "invalid_action"}), 400
+        # ================= OPEN =================
+        if action == "OPEN":
+            side = data["side"]
+            amount = float(data["amount"])
+            leverage = int(data["leverage"])
+
+            position_side = "LONG" if side == "BUY" else "SHORT"
+            order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
+
+            # ตั้ง leverage
+            client.futures_change_leverage(symbol=symbol, leverage=leverage)
+
+            client.futures_create_order(
+                symbol=symbol,
+                side=order_side,
+                type=ORDER_TYPE_MARKET,
+                quantity=amount,
+                positionSide=position_side,
+                newClientOrderId=order_id
+            )
+
+            return jsonify({"status": "opened"})
+
+        return jsonify({"error": "invalid action"})
 
     except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาด: {str(e)}")
-        return jsonify({"status": "error", "message": str(e)}), 400
+        print("❌ ERROR:", e)
+        return jsonify({"error": str(e)}), 400
+
+
+@app.route("/")
+def home():
+    return "Bot is running 🚀"
+
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=10000)
