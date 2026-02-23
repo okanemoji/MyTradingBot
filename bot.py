@@ -5,8 +5,9 @@ from binance.exceptions import BinanceAPIException
 import os
 import time
 import threading
+import math
 
-# ===== READ ENV VARIABLES DIRECTLY =====
+# ===== ENV VARIABLES =====
 API_KEY = os.environ.get("BINANCE_API_KEY")
 API_SECRET = os.environ.get("BINANCE_API_SECRET")
 
@@ -23,13 +24,17 @@ recent_alerts = {}
 ALERT_COOLDOWN = 2  # วินาที ป้องกัน alert ซ้ำ
 lock = threading.Lock()
 
-# ===== FUNCTION: HANDLE ALERT =====
+# ===== HELPER FUNCTION: ROUND QTY TO STEP SIZE =====
+def round_step_size(quantity, step_size):
+    return math.floor(quantity / step_size) * step_size
+
+# ===== HANDLE ALERT =====
 def handle_alert(alert_json):
     alert_id = alert_json.get("id")
     action = alert_json.get("action")  # OPEN / CLOSE
     side = alert_json.get("side")      # BUY / SELL
     symbol = alert_json.get("symbol")
-    qty = float(alert_json.get("amount", 0))
+    qty_from_alert = float(alert_json.get("amount", 0))
     leverage = int(alert_json.get("leverage", 1))
 
     with lock:
@@ -43,18 +48,34 @@ def handle_alert(alert_json):
         print(f"[DEBUG] Received alert: {alert_json}")
 
         try:
-            # ตั้ง leverage
+            # ===== SET LEVERAGE =====
             resp_leverage = client.futures_change_leverage(symbol=symbol, leverage=leverage)
             print(f"[DEBUG] Set leverage response: {resp_leverage}")
 
-            # Hedge Mode → positionSide
+            # ===== GET STEP SIZE =====
+            step_size = None
+            info = client.futures_exchange_info()
+            for s in info['symbols']:
+                if s['symbol'] == symbol:
+                    step_size = float(s['filters'][2]['stepSize'])
+                    break
+            if step_size is None:
+                print(f"[ERROR] Cannot find stepSize for symbol {symbol}")
+                return
+
+            qty_to_send = round_step_size(qty_from_alert, step_size)
+            if qty_to_send <= 0:
+                print(f"[ERROR] Quantity after rounding <= 0, original: {qty_from_alert}, stepSize: {step_size}")
+                return
+
+            # ===== DETERMINE POSITION SIDE =====
             if action == "OPEN":
                 position_side = "LONG" if side == "BUY" else "SHORT"
                 resp_order = client.futures_create_order(
                     symbol=symbol,
                     side=SIDE_BUY if side == "BUY" else SIDE_SELL,
                     type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=qty,
+                    quantity=qty_to_send,
                     positionSide=position_side
                 )
             elif action == "CLOSE":
@@ -63,7 +84,7 @@ def handle_alert(alert_json):
                     symbol=symbol,
                     side=SIDE_SELL if side == "BUY" else SIDE_BUY,
                     type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=qty,
+                    quantity=qty_to_send,
                     positionSide=position_side
                 )
 
