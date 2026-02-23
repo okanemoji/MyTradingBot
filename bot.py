@@ -30,6 +30,7 @@ def handle_alert(alert_json):
     qty = float(alert_json.get("amount", 0))
     leverage = int(alert_json.get("leverage", 1))
 
+    # ป้องกัน alert ซ้ำ
     with lock:
         now = time.time()
         if alert_id in recent_alerts and now - recent_alerts[alert_id] < ALERT_COOLDOWN:
@@ -45,7 +46,7 @@ def handle_alert(alert_json):
             resp_leverage = client.futures_change_leverage(symbol=symbol, leverage=leverage)
             print(f"[DEBUG] Set leverage response: {resp_leverage}")
 
-            # Hedge Mode ต้องระบุ positionSide
+            # Hedge Mode → positionSide
             if action == "OPEN":
                 position_side = "LONG" if side == "BUY" else "SHORT"
                 resp_order = client.futures_create_order(
@@ -64,6 +65,7 @@ def handle_alert(alert_json):
                     quantity=qty,
                     positionSide=position_side
                 )
+
             print(f"[SUCCESS] Order executed: {resp_order}")
         except BinanceAPIException as e:
             print(f"[ERROR] BinanceAPIException: {e.status_code} {e.message}")
@@ -91,6 +93,5 @@ def webhook():
     handle_alert(data)
     return jsonify({"status": "ok"}), 200
 
-# ===== RUN APP =====
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
