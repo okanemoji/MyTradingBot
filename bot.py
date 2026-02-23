@@ -16,23 +16,12 @@ client = Client(API_KEY, API_SECRET)
 app = Flask(__name__)
 
 # ===== GLOBAL VARIABLES =====
-recent_alerts = {}       # ป้องกัน alert ซ้ำ
+recent_alerts = {}
 ALERT_COOLDOWN = 2       # วินาที delay ป้องกัน alert ซ้ำ
 lock = threading.Lock()
 
 # ===== FUNCTION: HANDLE ALERT =====
-def handle_alert(alert_json, test_mode=True):
-    """
-    alert_json ตัวอย่าง:
-    {
-      "id": "1677051234567_BUY_OPEN",
-      "action": "OPEN",
-      "side": "BUY",
-      "symbol": "XAUUSDT",
-      "amount": 0.1,
-      "leverage": 10
-    }
-    """
+def handle_alert(alert_json):
     alert_id = alert_json.get("id")
     action = alert_json.get("action")
     side = alert_json.get("side")
@@ -49,18 +38,13 @@ def handle_alert(alert_json, test_mode=True):
                 return
         recent_alerts[alert_id] = now
 
-    # เรียก Binance API ใน thread แยก
     def execute_order():
-        print(f"[INFO] Received alert: {alert_json}")
-
-        if test_mode:
-            print(f"[TEST MODE] Would execute order: {side} {action} {qty} {symbol} @ leverage {leverage}")
-            return
-
         try:
+            print(f"[INFO] Executing alert: {alert_json}")
             # ตั้ง leverage
             client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
+            # เปิด/ปิด order ตาม action
             if action == "OPEN":
                 if side == "BUY":
                     client.futures_create_order(
@@ -77,7 +61,7 @@ def handle_alert(alert_json, test_mode=True):
                         quantity=qty
                     )
             elif action == "CLOSE":
-                # ปิด position ด้วย opposite order
+                # ปิด position ด้วย opposite market order
                 if side == "BUY":
                     client.futures_create_order(
                         symbol=symbol,
@@ -105,17 +89,16 @@ def alert():
     if not data:
         return jsonify({"status": "error", "message": "No JSON provided"}), 400
 
-    # test_mode=True -> print JSON แทนส่งจริง
-    handle_alert(data, test_mode=True)
+    handle_alert(data)  # ส่งจริง
     return jsonify({"status": "ok"}), 200
 
-# เพิ่ม /webhook ให้รองรับ TradingView ที่ยิงมาแบบ webhook
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
     if not data:
         return jsonify({"status": "error", "message": "No JSON provided"}), 400
-    handle_alert(data, test_mode=True)
+
+    handle_alert(data)  # ส่งจริง
     return jsonify({"status": "ok"}), 200
 
 # ===== RUN APP =====
