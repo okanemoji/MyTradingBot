@@ -6,14 +6,15 @@ import os
 import time
 import threading
 
-# ===== LOAD ENVIRONMENT VARIABLES DIRECTLY =====
+# ===== READ ENV VARIABLES DIRECTLY =====
 API_KEY = os.environ.get("BINANCE_API_KEY")
 API_SECRET = os.environ.get("BINANCE_API_SECRET")
 
 if not API_KEY or not API_SECRET:
-    raise Exception("ERROR: Binance API_KEY / API_SECRET not set in environment variables")
+    raise Exception("ERROR: BINANCE_API_KEY / BINANCE_API_SECRET not set")
 
-client = Client(API_KEY, API_SECRET)
+# ===== CONNECT TESTNET =====
+client = Client(API_KEY, API_SECRET, testnet=True)
 
 app = Flask(__name__)
 
@@ -93,5 +94,6 @@ def webhook():
     handle_alert(data)
     return jsonify({"status": "ok"}), 200
 
+# ===== RUN APP =====
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
