@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from binance.client import Client
 from binance.enums import *
+from binance.exceptions import BinanceAPIException
 from dotenv import load_dotenv
 import os
 import time
@@ -17,7 +18,7 @@ app = Flask(__name__)
 
 # ===== GLOBAL VARIABLES =====
 recent_alerts = {}
-ALERT_COOLDOWN = 2       # วินาที delay ป้องกัน alert ซ้ำ
+ALERT_COOLDOWN = 2  # วินาที ป้องกัน alert ซ้ำ
 lock = threading.Lock()
 
 # ===== FUNCTION: HANDLE ALERT =====
@@ -29,7 +30,6 @@ def handle_alert(alert_json):
     qty = float(alert_json.get("amount", 0))
     leverage = int(alert_json.get("leverage", 1))
 
-    # ป้องกัน alert ซ้ำ
     with lock:
         now = time.time()
         if alert_id in recent_alerts and now - recent_alerts[alert_id] < ALERT_COOLDOWN:
@@ -38,16 +38,17 @@ def handle_alert(alert_json):
         recent_alerts[alert_id] = now
 
     def execute_order():
-        try:
-            print(f"[INFO] Executing alert: {alert_json}")
+        print(f"[DEBUG] Received alert: {alert_json}")
 
+        try:
             # ตั้ง leverage
-            client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            resp_leverage = client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            print(f"[DEBUG] Set leverage response: {resp_leverage}")
 
             # Hedge Mode ต้องระบุ positionSide
             if action == "OPEN":
                 position_side = "LONG" if side == "BUY" else "SHORT"
-                client.futures_create_order(
+                resp_order = client.futures_create_order(
                     symbol=symbol,
                     side=SIDE_BUY if side == "BUY" else SIDE_SELL,
                     type=FUTURE_ORDER_TYPE_MARKET,
@@ -55,19 +56,19 @@ def handle_alert(alert_json):
                     positionSide=position_side
                 )
             elif action == "CLOSE":
-                # ปิด position ต้องใช้ opposite side + same positionSide
                 position_side = "LONG" if side == "BUY" else "SHORT"
-                client.futures_create_order(
+                resp_order = client.futures_create_order(
                     symbol=symbol,
                     side=SIDE_SELL if side == "BUY" else SIDE_BUY,
                     type=FUTURE_ORDER_TYPE_MARKET,
                     quantity=qty,
                     positionSide=position_side
                 )
-
-            print(f"[SUCCESS] Alert executed: {alert_id}")
+            print(f"[SUCCESS] Order executed: {resp_order}")
+        except BinanceAPIException as e:
+            print(f"[ERROR] BinanceAPIException: {e.status_code} {e.message}")
         except Exception as e:
-            print(f"[ERROR] Failed to execute alert {alert_id}: {e}")
+            print(f"[ERROR] Unexpected exception: {e}")
 
     threading.Thread(target=execute_order).start()
 
@@ -78,7 +79,7 @@ def alert():
     if not data:
         return jsonify({"status": "error", "message": "No JSON provided"}), 400
 
-    handle_alert(data)  # ส่งจริงไป Binance
+    handle_alert(data)
     return jsonify({"status": "ok"}), 200
 
 @app.route("/webhook", methods=["POST"])
@@ -87,7 +88,7 @@ def webhook():
     if not data:
         return jsonify({"status": "error", "message": "No JSON provided"}), 400
 
-    handle_alert(data)  # ส่งจริงไป Binance
+    handle_alert(data)
     return jsonify({"status": "ok"}), 200
 
 # ===== RUN APP =====
