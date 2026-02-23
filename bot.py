@@ -6,23 +6,22 @@ import os
 import time
 import threading
 
-# ================= ENV =================
+# ===== ENV =====
 load_dotenv()
 API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
-# ================= CLIENT =================
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
-# ===== SYNC TIME =====
+# ===== SYNC TIME (ครั้งเดียวพอ) =====
 server_time = client.get_server_time()["serverTime"]
 local_time = int(time.time() * 1000)
 client.timestamp_offset = server_time - local_time
 
 app = Flask(__name__)
 
-# ================= DUPLICATE PROTECTION =================
+# ===== DUPLICATE PROTECTION =====
 processed_ids = set()
 lock = threading.Lock()
 
@@ -32,79 +31,42 @@ def is_duplicate(order_id):
             return True
         processed_ids.add(order_id)
 
-        if len(processed_ids) > 500:
+        if len(processed_ids) > 1000:
             processed_ids.clear()
 
         return False
 
-# ================= UTILS =================
-def get_position(symbol, position_side):
-    positions = client.futures_position_information(symbol=symbol)
-    for p in positions:
-        if p["positionSide"] == position_side and abs(float(p["positionAmt"])) > 0:
-            return p
-    return None
+# ===== TRACK LEVERAGE PER SYMBOL =====
+symbol_leverage = {}
 
-# ================= WEBHOOK =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.json
-    print("📩 Received:", data)
 
     try:
-        # ===== HEARTBEAT =====
-        if data.get("action") == "HEARTBEAT":
-            try:
-                client.get_server_time()
-                print("💓 Heartbeat OK")
-            except Exception as e:
-                print("⚠ Heartbeat failed:", e)
-            return jsonify({"status": "heartbeat ok"})
-
         order_id = data.get("id")
         if not order_id:
             return jsonify({"error": "missing id"}), 400
 
         if is_duplicate(order_id):
-            print("⚠ Duplicate blocked:", order_id)
             return jsonify({"status": "duplicate ignored"})
 
-        action = data.get("action")
+        action = data["action"]
         symbol = data["symbol"]
+        side = data["side"]
 
-        # ===== CLOSE =====
-        if action == "CLOSE":
-            side = data["side"]
-            position_side = "LONG" if side == "BUY" else "SHORT"
-            close_side = SIDE_SELL if side == "BUY" else SIDE_BUY
-
-            pos = get_position(symbol, position_side)
-            if not pos:
-                return jsonify({"status": "no position"})
-
-            qty = abs(float(pos["positionAmt"]))
-
-            client.futures_create_order(
-                symbol=symbol,
-                side=close_side,
-                type=ORDER_TYPE_MARKET,
-                quantity=qty,
-                positionSide=position_side,
-                newClientOrderId=order_id
-            )
-
-            return jsonify({"status": "closed"})
+        position_side = "LONG" if side == "BUY" else "SHORT"
+        order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
         # ===== OPEN =====
         if action == "OPEN":
-            side = data["side"]
             amount = float(data["amount"])
             leverage = int(data["leverage"])
 
-            position_side = "LONG" if side == "BUY" else "SHORT"
-            order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
-
-            client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            # เปลี่ยน leverage เฉพาะตอนยังไม่เคยตั้ง
+            if symbol not in symbol_leverage:
+                client.futures_change_leverage(symbol=symbol, leverage=leverage)
+                symbol_leverage[symbol] = leverage
 
             client.futures_create_order(
                 symbol=symbol,
@@ -112,15 +74,31 @@ def webhook():
                 type=ORDER_TYPE_MARKET,
                 quantity=amount,
                 positionSide=position_side,
-                newClientOrderId=order_id
+                newClientOrderId=order_id,
+                recvWindow=5000
             )
 
             return jsonify({"status": "opened"})
 
+        # ===== CLOSE (ไม่ query position) =====
+        if action == "CLOSE":
+
+            client.futures_create_order(
+                symbol=symbol,
+                side=SIDE_SELL if side == "BUY" else SIDE_BUY,
+                type=ORDER_TYPE_MARKET,
+                quantity=float(data.get("amount", 0)),  # optional
+                positionSide=position_side,
+                reduceOnly=True,
+                newClientOrderId=order_id,
+                recvWindow=5000
+            )
+
+            return jsonify({"status": "closed"})
+
         return jsonify({"error": "invalid action"})
 
     except Exception as e:
-        print("❌ ERROR:", e)
         return jsonify({"error": str(e)}), 400
 
 
