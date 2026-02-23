@@ -14,7 +14,8 @@ API_SECRET = os.environ.get("BINANCE_API_SECRET")
 if not API_KEY or not API_SECRET:
     raise Exception("ERROR: BINANCE_API_KEY / BINANCE_API_SECRET not set")
 
-# ===== CONNECT TESTNET =====
+# ===== CONNECT TESTNET / REAL =====
+# testnet=True สำหรับทดสอบ, testnet=False สำหรับบัญชีจริง
 client = Client(API_KEY, API_SECRET, testnet=True)
 
 app = Flask(__name__)
@@ -52,43 +53,55 @@ def handle_alert(alert_json):
             resp_leverage = client.futures_change_leverage(symbol=symbol, leverage=leverage)
             print(f"[DEBUG] Set leverage response: {resp_leverage}")
 
-            # ===== GET STEP SIZE =====
+            # ===== GET SYMBOL INFO =====
             step_size = None
+            max_qty = None
             info = client.futures_exchange_info()
             for s in info['symbols']:
                 if s['symbol'] == symbol:
                     step_size = float(s['filters'][2]['stepSize'])
+                    max_qty = float(s['filters'][2]['maxQty'])
                     break
-            if step_size is None:
-                print(f"[ERROR] Cannot find stepSize for symbol {symbol}")
+            if step_size is None or max_qty is None:
+                print(f"[ERROR] Cannot find stepSize/maxQty for symbol {symbol}")
                 return
 
+            # ===== ROUND QTY TO STEP SIZE =====
             qty_to_send = round_step_size(qty_from_alert, step_size)
             if qty_to_send <= 0:
                 print(f"[ERROR] Quantity after rounding <= 0, original: {qty_from_alert}, stepSize: {step_size}")
                 return
 
-            # ===== DETERMINE POSITION SIDE =====
-            if action == "OPEN":
-                position_side = "LONG" if side == "BUY" else "SHORT"
-                resp_order = client.futures_create_order(
-                    symbol=symbol,
-                    side=SIDE_BUY if side == "BUY" else SIDE_SELL,
-                    type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=qty_to_send,
-                    positionSide=position_side
-                )
-            elif action == "CLOSE":
-                position_side = "LONG" if side == "BUY" else "SHORT"
-                resp_order = client.futures_create_order(
-                    symbol=symbol,
-                    side=SIDE_SELL if side == "BUY" else SIDE_BUY,
-                    type=FUTURE_ORDER_TYPE_MARKET,
-                    quantity=qty_to_send,
-                    positionSide=position_side
-                )
+            # ===== SPLIT QTY IF > maxQty =====
+            orders = []
+            remaining_qty = qty_to_send
+            while remaining_qty > max_qty:
+                orders.append(max_qty)
+                remaining_qty -= max_qty
+            if remaining_qty > 0:
+                orders.append(remaining_qty)
 
-            print(f"[SUCCESS] Order executed: {resp_order}")
+            # ===== DETERMINE POSITION SIDE =====
+            for q in orders:
+                position_side = "LONG" if side == "BUY" else "SHORT"
+                if action == "OPEN":
+                    resp_order = client.futures_create_order(
+                        symbol=symbol,
+                        side=SIDE_BUY if side == "BUY" else SIDE_SELL,
+                        type=FUTURE_ORDER_TYPE_MARKET,
+                        quantity=q,
+                        positionSide=position_side
+                    )
+                elif action == "CLOSE":
+                    resp_order = client.futures_create_order(
+                        symbol=symbol,
+                        side=SIDE_SELL if side == "BUY" else SIDE_BUY,
+                        type=FUTURE_ORDER_TYPE_MARKET,
+                        quantity=q,
+                        positionSide=position_side
+                    )
+                print(f"[SUCCESS] Order executed: qty={q} {resp_order}")
+
         except BinanceAPIException as e:
             print(f"[ERROR] BinanceAPIException: {e.status_code} {e.message}")
         except Exception as e:
