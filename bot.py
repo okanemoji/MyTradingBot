@@ -45,14 +45,16 @@ def get_position_amt(symbol, side):
 # ================= WEBHOOK ROUTE =================
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.json
-    print(f"📩 Received Alert: {data}")
-
+    # ดูว่าข้อมูลที่เข้ามาหน้าตาเป็นยังไง
+    raw_data = request.get_data(as_text=True)
+    print(f"RAW DATA: {raw_data}") 
+    
     try:
-        # 1. Check ID & Duplicates
-        order_id = data.get("id")
-        if not order_id or is_duplicate(order_id):
-            return jsonify({"status": "ignored", "reason": "duplicate or missing id"}), 200
+        data = request.json
+        if data is None:
+            return jsonify({"error": "Request must be JSON"}), 400
+            
+        # ... ส่วนที่เหลือของโค้ด ...
 
         action = data.get("action")   # OPEN หรือ CLOSE
         side = data.get("side")       # BUY หรือ SELL
