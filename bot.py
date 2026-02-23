@@ -16,7 +16,6 @@ API_KEY = os.getenv("BINANCE_API_KEY")
 API_SECRET = os.getenv("BINANCE_API_SECRET")
 
 app = Flask(__name__)
-
 client = None
 
 # ================= SAFE INIT =================
@@ -24,21 +23,22 @@ def init_binance():
     global client
     while True:
         try:
-            client = Client(API_KEY, API_SECRET, {"timeout": 20})
+            c = Client(API_KEY, API_SECRET, {"timeout": 20})
 
             # sync time
-            server_time = client.get_server_time()["serverTime"]
+            server_time = c.get_server_time()["serverTime"]
             local_time = int(time.time() * 1000)
-            client.timestamp_offset = server_time - local_time
+            c.timestamp_offset = server_time - local_time
 
             # set leverage once
-            client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
+            c.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
 
+            client = c
             print("✅ Binance connected (One-way mode)")
             break
 
         except Exception as e:
-            print("⚠ Binance init failed:", e)
+            print("⚠ Init failed:", e)
             print("⏳ Retry in 60 sec...")
             time.sleep(60)
 
@@ -74,10 +74,14 @@ def webhook():
     if client is None:
         return jsonify({"error": "binance not ready"}), 503
 
-    data = request.json
-    print("📩 Received:", data)
-
     try:
+        data = request.get_json(force=True)
+
+        if not data:
+            return jsonify({"error": "invalid json"}), 400
+
+        print("📩 Received:", data)
+
         order_id = data.get("id")
         action = data.get("action")
 
@@ -89,8 +93,17 @@ def webhook():
 
         # ===== OPEN =====
         if action == "OPEN":
-            side = data["side"]
-            qty = float(data["amount"])
+
+            side = data.get("side")
+            qty = data.get("amount")
+
+            if side not in ["BUY", "SELL"]:
+                return jsonify({"error": "invalid side"}), 400
+
+            if qty is None:
+                return jsonify({"error": "missing amount"}), 400
+
+            qty = float(qty)
 
             order_side = SIDE_BUY if side == "BUY" else SIDE_SELL
 
@@ -105,6 +118,7 @@ def webhook():
 
         # ===== CLOSE =====
         if action == "CLOSE":
+
             amt = get_position_amt()
 
             if amt == 0:
@@ -122,7 +136,7 @@ def webhook():
 
             return jsonify({"status": "closed"})
 
-        return jsonify({"error": "invalid action"})
+        return jsonify({"error": "invalid action"}), 400
 
     except Exception as e:
         print("❌ ERROR:", e)
