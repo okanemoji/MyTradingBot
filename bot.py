@@ -23,9 +23,31 @@ ALERT_COOLDOWN = 2
 lock = threading.Lock()
 
 
+# =========================
+# UTIL
+# =========================
+
 def round_step_size(quantity, step_size):
     return math.floor(quantity / step_size) * step_size
 
+
+# =========================
+# PING ROUTE (กันหลับ)
+# =========================
+
+@app.route("/", methods=["GET"])
+def home():
+    return jsonify({"status": "bot running"}), 200
+
+
+@app.route("/ping", methods=["GET", "POST"])
+def ping():
+    return jsonify({"status": "ok"}), 200
+
+
+# =========================
+# TRADING LOGIC
+# =========================
 
 def close_full_position(symbol, side):
     positions = client.futures_position_information(symbol=symbol)
@@ -45,11 +67,10 @@ def close_full_position(symbol, side):
             continue
 
         qty = abs(position_amt)
-
         if qty == 0:
             continue
 
-        resp = client.futures_create_order(
+        client.futures_create_order(
             symbol=symbol,
             side=close_side,
             type=FUTURE_ORDER_TYPE_MARKET,
@@ -77,9 +98,13 @@ def open_position(symbol, side, qty, leverage):
 
     qty = round_step_size(qty, step_size)
 
+    if qty <= 0:
+        print("Quantity too small after rounding")
+        return
+
     position_side = "LONG" if side == "BUY" else "SHORT"
 
-    resp = client.futures_create_order(
+    client.futures_create_order(
         symbol=symbol,
         side=SIDE_BUY if side == "BUY" else SIDE_SELL,
         type=FUTURE_ORDER_TYPE_MARKET,
@@ -95,8 +120,17 @@ def handle_alert(alert_json):
     action = alert_json.get("action")
     side = alert_json.get("side")
     symbol = alert_json.get("symbol")
-    qty = float(alert_json.get("amount", 0))
-    leverage = int(alert_json.get("leverage", 1))
+
+    try:
+        qty = float(alert_json.get("amount", 0))
+        leverage = int(alert_json.get("leverage", 1))
+    except:
+        print("Invalid amount or leverage")
+        return
+
+    if not alert_id or not action or not side or not symbol:
+        print("Missing required fields")
+        return
 
     with lock:
         now = time.time()
@@ -118,15 +152,25 @@ def handle_alert(alert_json):
         print(f"Unexpected error: {e}")
 
 
+# =========================
+# WEBHOOK
+# =========================
+
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json()
+    data = request.get_json(silent=True)
+
     if not data:
-        return jsonify({"error": "No JSON"}), 400
+        return jsonify({"error": "Invalid JSON"}), 400
 
-    threading.Thread(target=handle_alert, args=(data,)).start()
-    return jsonify({"status": "ok"}), 200
+    t = threading.Thread(target=handle_alert, args=(data,))
+    t.daemon = True
+    t.start()
 
+    return jsonify({"status": "received"}), 200
+
+
+# =========================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
