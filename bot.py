@@ -18,6 +18,11 @@ if not API_KEY or not API_SECRET:
 
 client = Client(API_KEY, API_SECRET)
 
+# ใช้ Testnet
+client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
+
+client = Client(API_KEY, API_SECRET)
+
 app = Flask(__name__)
 
 # =========================
