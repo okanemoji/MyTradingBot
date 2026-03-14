@@ -14,7 +14,7 @@ API_SECRET = os.environ.get("BINANCE_API_SECRET")
 if not API_KEY or not API_SECRET:
     raise Exception("Missing Binance API keys")
 
-client = Client(API_KEY, API_SECRET, testnet=True)
+client = Client(API_KEY, API_SECRET)
 
 app = Flask(__name__)
 
