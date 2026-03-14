@@ -7,6 +7,7 @@ import time
 import threading
 import math
 import queue
+import json
 
 # ===== ENV =====
 API_KEY = os.environ.get("BINANCE_API_KEY")
@@ -29,7 +30,7 @@ order_queue = queue.Queue()
 ORDER_DELAY = 0.3
 
 # =========================
-# LOAD SYMBOL FILTERS ONCE
+# LOAD EXCHANGE INFO ONCE
 # =========================
 symbol_filters = {}
 
@@ -55,21 +56,25 @@ def round_step_size(quantity, step_size):
 def home():
     return jsonify({"status": "bot running"}), 200
 
-@app.route("/ping", methods=["GET", "POST"])
+@app.route("/ping", methods=["GET","POST"])
 def ping():
-    return jsonify({"status": "ok"}), 200
+    return jsonify({"status":"ok"}),200
 
 # =========================
 # POSITION CHECK
 # =========================
 def get_position(symbol):
+
     positions = client.futures_position_information(symbol=symbol)
+
     long_amt = 0
     short_amt = 0
 
     for pos in positions:
+
         if pos["positionSide"] == "LONG":
             long_amt = float(pos["positionAmt"])
+
         if pos["positionSide"] == "SHORT":
             short_amt = abs(float(pos["positionAmt"]))
 
@@ -101,7 +106,7 @@ def close_position(symbol, side):
                 reduceOnly=True
             )
 
-            print(f"[CLOSE] LONG {abs(position_amt)}")
+            print("[CLOSE] LONG", abs(position_amt))
 
         elif side == "SELL" and position_side == "SHORT":
 
@@ -114,7 +119,7 @@ def close_position(symbol, side):
                 reduceOnly=True
             )
 
-            print(f"[CLOSE] SHORT {abs(position_amt)}")
+            print("[CLOSE] SHORT", abs(position_amt))
 
 # =========================
 # OPEN POSITION
@@ -147,17 +152,17 @@ def open_position(symbol, side, qty, leverage):
 
     position_side = "LONG" if side == "BUY" else "SHORT"
 
-    print(f"[OPEN TRY] {symbol} {side} {qty}")
+    print("[OPEN TRY]", symbol, side, qty)
 
     client.futures_create_order(
         symbol=symbol,
-        side=SIDE_BUY if side == "BUY" else SIDE_SELL,
+        side=SIDE_BUY if side=="BUY" else SIDE_SELL,
         type=FUTURE_ORDER_TYPE_MARKET,
         quantity=qty,
         positionSide=position_side
     )
 
-    print(f"[OPENED] {position_side} {qty}")
+    print("[OPENED]", position_side, qty)
 
 # =========================
 # HANDLE ALERT
@@ -171,8 +176,8 @@ def handle_alert(data):
     side = data.get("side")
     symbol = data.get("symbol")
 
-    qty = float(data.get("amount", 0))
-    leverage = int(data.get("leverage", 1))
+    qty = float(data.get("amount",0))
+    leverage = int(data.get("leverage",1))
 
     if not alert_id or not action or not side or not symbol:
         print("Invalid alert")
@@ -187,10 +192,10 @@ def handle_alert(data):
             open_position(symbol, side, qty, leverage)
 
     except BinanceAPIException as e:
-        print(f"Binance error: {e.message}")
+        print("Binance error:", e.message)
 
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        print("Unexpected error:", e)
 
 # =========================
 # ENQUEUE ALERT
@@ -242,20 +247,23 @@ worker.start()
 @app.route("/webhook", methods=["POST"])
 def webhook():
 
-    data = request.get_json(silent=True)
+    raw = request.data.decode("utf-8")
 
-    if not data:
-        return jsonify({"error": "Invalid JSON"}), 400
+    try:
+        data = json.loads(raw)
+    except:
+        print("Invalid JSON received:", raw)
+        return jsonify({"status":"ignored"}),200
 
     enqueue_alert(data)
 
-    return jsonify({"status": "queued"}), 200
+    return jsonify({"status":"queued"}),200
 
 # =========================
 # RUN
 # =========================
 if __name__ == "__main__":
 
-    port = int(os.environ.get("PORT", 5000))
+    port = int(os.environ.get("PORT",5000))
 
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0",port=port)
