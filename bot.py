@@ -32,7 +32,7 @@ def round_step_size(quantity, step_size):
 
 
 # =========================
-# PING ROUTE (กันหลับ)
+# PING ROUTE
 # =========================
 
 @app.route("/", methods=["GET"])
@@ -46,42 +46,76 @@ def ping():
 
 
 # =========================
-# TRADING LOGIC
+# POSITION CHECK
 # =========================
 
-def close_full_position(symbol, side):
+def get_position(symbol):
+
+    positions = client.futures_position_information(symbol=symbol)
+
+    long_amt = 0
+    short_amt = 0
+
+    for pos in positions:
+
+        if pos["positionSide"] == "LONG":
+            long_amt = float(pos["positionAmt"])
+
+        if pos["positionSide"] == "SHORT":
+            short_amt = abs(float(pos["positionAmt"]))
+
+    return long_amt, short_amt
+
+
+# =========================
+# CLOSE POSITION
+# =========================
+
+def close_position(symbol, side):
+
     positions = client.futures_position_information(symbol=symbol)
 
     for pos in positions:
-        if pos["symbol"] != symbol:
-            continue
 
         position_amt = float(pos["positionAmt"])
         position_side = pos["positionSide"]
 
-        if side == "BUY" and position_side == "LONG" and position_amt > 0:
-            close_side = SIDE_SELL
-        elif side == "SELL" and position_side == "SHORT" and position_amt < 0:
-            close_side = SIDE_BUY
-        else:
+        if position_amt == 0:
             continue
 
-        qty = abs(position_amt)
-        if qty == 0:
-            continue
+        if side == "BUY" and position_side == "LONG":
 
-        client.futures_create_order(
-            symbol=symbol,
-            side=close_side,
-            type=FUTURE_ORDER_TYPE_MARKET,
-            quantity=qty,
-            positionSide=position_side
-        )
+            client.futures_create_order(
+                symbol=symbol,
+                side=SIDE_SELL,
+                type=FUTURE_ORDER_TYPE_MARKET,
+                quantity=abs(position_amt),
+                positionSide="LONG",
+                reduceOnly=True
+            )
 
-        print(f"[SUCCESS] Closed FULL {position_side} qty={qty}")
+            print(f"Closed LONG {abs(position_amt)}")
 
+        elif side == "SELL" and position_side == "SHORT":
+
+            client.futures_create_order(
+                symbol=symbol,
+                side=SIDE_BUY,
+                type=FUTURE_ORDER_TYPE_MARKET,
+                quantity=abs(position_amt),
+                positionSide="SHORT",
+                reduceOnly=True
+            )
+
+            print(f"Closed SHORT {abs(position_amt)}")
+
+
+# =========================
+# OPEN POSITION
+# =========================
 
 def open_position(symbol, side, qty, leverage):
+
     client.futures_change_leverage(symbol=symbol, leverage=leverage)
 
     info = client.futures_exchange_info()
@@ -93,13 +127,24 @@ def open_position(symbol, side, qty, leverage):
             break
 
     if step_size is None:
-        print("Cannot find step size")
+        print("Step size not found")
         return
 
     qty = round_step_size(qty, step_size)
 
     if qty <= 0:
-        print("Quantity too small after rounding")
+        print("Quantity too small")
+        return
+
+    long_amt, short_amt = get_position(symbol)
+
+    # กันเปิดซ้ำ
+    if side == "BUY" and long_amt > 0:
+        print("Already LONG")
+        return
+
+    if side == "SELL" and short_amt > 0:
+        print("Already SHORT")
         return
 
     position_side = "LONG" if side == "BUY" else "SHORT"
@@ -112,42 +157,48 @@ def open_position(symbol, side, qty, leverage):
         positionSide=position_side
     )
 
-    print(f"[SUCCESS] Opened {position_side} qty={qty}")
+    print(f"Opened {position_side} {qty}")
 
 
-def handle_alert(alert_json):
-    alert_id = alert_json.get("id")
-    action = alert_json.get("action")
-    side = alert_json.get("side")
-    symbol = alert_json.get("symbol")
+# =========================
+# HANDLE ALERT
+# =========================
 
-    try:
-        qty = float(alert_json.get("amount", 0))
-        leverage = int(alert_json.get("leverage", 1))
-    except:
-        print("Invalid amount or leverage")
-        return
+def handle_alert(data):
+
+    alert_id = data.get("id")
+    action = data.get("action")
+    side = data.get("side")
+    symbol = data.get("symbol")
+
+    qty = float(data.get("amount", 0))
+    leverage = int(data.get("leverage", 1))
 
     if not alert_id or not action or not side or not symbol:
-        print("Missing required fields")
+        print("Invalid alert")
         return
 
     with lock:
+
         now = time.time()
+
         if alert_id in recent_alerts and now - recent_alerts[alert_id] < ALERT_COOLDOWN:
-            print("Duplicate alert skipped")
+            print("Duplicate alert")
             return
+
         recent_alerts[alert_id] = now
 
     try:
+
         if action == "CLOSE":
-            close_full_position(symbol, side)
+            close_position(symbol, side)
 
         elif action == "OPEN":
             open_position(symbol, side, qty, leverage)
 
     except BinanceAPIException as e:
         print(f"Binance error: {e.message}")
+
     except Exception as e:
         print(f"Unexpected error: {e}")
 
@@ -158,16 +209,15 @@ def handle_alert(alert_json):
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
+
     data = request.get_json(silent=True)
 
     if not data:
         return jsonify({"error": "Invalid JSON"}), 400
 
-    t = threading.Thread(target=handle_alert, args=(data,))
-    t.daemon = True
-    t.start()
+    handle_alert(data)
 
-    return jsonify({"status": "received"}), 200
+    return jsonify({"status": "ok"}), 200
 
 
 # =========================
