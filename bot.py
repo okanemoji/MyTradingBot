@@ -9,10 +9,10 @@ import time
 
 # ===== CONFIG =====
 SYMBOL = "ETHUSDT"
-LEVERAGE = 100
-LOT_SIZE = 2
-ORDER_DELAY = 0.5  # delay ระหว่าง order
-ALERT_COOLDOWN = 3  # วินาที
+LEVERAGE = 50
+LOT_SIZE = 0.01
+ORDER_DELAY = 1
+ALERT_COOLDOWN = 1
 
 # ===== BINANCE =====
 API_KEY = os.environ.get("BINANCE_API_KEY")
@@ -21,8 +21,10 @@ API_SECRET = os.environ.get("BINANCE_API_SECRET")
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
-# เปลี่ยน leverage
-client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
+client.futures_change_leverage(
+    symbol=SYMBOL,
+    leverage=LEVERAGE
+)
 
 # ===== APP =====
 app = Flask(__name__)
@@ -32,47 +34,42 @@ recent_alerts = {}
 order_queue = queue.Queue()
 lock = threading.Lock()
 
-# ===== GET POSITION (One-way mode) =====
+# ===== GET POSITION =====
 def get_position():
     positions = client.futures_position_information(symbol=SYMBOL)
-    long_amt = 0
-    short_amt = 0
     for p in positions:
         amt = float(p["positionAmt"])
-        if p["positionSide"] == "LONG":
-            long_amt = amt
-        elif p["positionSide"] == "SHORT":
-            short_amt = abs(amt)
-    return long_amt, short_amt
+        if amt != 0:
+            return amt
+    return 0
 
-# ===== PLACE ORDER (FLIP + OPEN) =====
+# ===== PLACE ORDER (FLIP LOGIC) =====
 def place_order(side):
     try:
-        long_amt, short_amt = get_position()
+        pos = get_position()
         qty = LOT_SIZE
-        side_upper = side.upper()
 
-        # ถ้ามีตำแหน่งตรงข้ามอยู่ ให้ flip
-        if side_upper == "BUY":
-            if short_amt > 0:
-                qty = short_amt + LOT_SIZE
-        elif side_upper == "SELL":
-            if long_amt > 0:
-                qty = long_amt + LOT_SIZE
+        # ถ้า opposite side ให้ flip quantity
+        if side.upper() == "BUY":
+            order_side = "BUY"
+            if pos < 0:
+                qty = abs(pos) + LOT_SIZE
+        elif side.upper() == "SELL":
+            order_side = "SELL"
+            if pos > 0:
+                qty = abs(pos) + LOT_SIZE
         else:
             print("INVALID SIDE:", side)
             return
 
-        # สร้าง order market
         client.futures_create_order(
             symbol=SYMBOL,
-            side=side_upper,
+            side=order_side,
             type="MARKET",
             quantity=qty
         )
-        print(time.strftime("%H:%M:%S"), "ORDER:", side_upper, "QTY:", qty)
-        # รอให้ Binance update position
-        time.sleep(0.3)
+
+        print(time.strftime("%H:%M:%S"), "ORDER:", order_side, "QTY:", qty)
 
     except BinanceAPIException as e:
         print("BINANCE ERROR:", e.message)
@@ -80,7 +77,7 @@ def place_order(side):
             print("RATE LIMIT - SLEEP")
             time.sleep(60)
 
-# ===== WORKER THREAD =====
+# ===== WORKER =====
 def worker():
     while True:
         data = order_queue.get()
@@ -107,13 +104,7 @@ def enqueue_alert(data):
         recent_alerts[alert_id] = now
     order_queue.put(data)
 
-# ===== PING KEEP ALIVE =====
-@app.route("/ping", methods=["POST","GET"])
-def ping():
-    print(time.strftime("%H:%M:%S"), "PING received")
-    return jsonify({"status":"ok"})
-
-# ===== WEBHOOK =====
+# ===== ROUTES =====
 @app.route("/webhook", methods=["POST"])
 def webhook():
     raw = request.data.decode()
@@ -129,7 +120,6 @@ def webhook():
     enqueue_alert(data)
     return jsonify({"status":"queued"})
 
-# ===== HOME =====
 @app.route("/")
 def home():
     return "bot running"
