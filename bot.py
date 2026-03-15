@@ -104,6 +104,12 @@ def enqueue_alert(data):
         recent_alerts[alert_id] = now
     order_queue.put(data)
 
+# ===== PING KEEP ALIVE =====
+@app.route("/ping", methods=["POST","GET"])
+def ping():
+    print(time.strftime("%H:%M:%S"), "PING received")
+    return jsonify({"status":"ok"})
+
 # ===== ROUTES =====
 @app.route("/webhook", methods=["POST"])
 def webhook():
