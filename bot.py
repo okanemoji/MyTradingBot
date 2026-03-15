@@ -1,81 +1,89 @@
 from flask import Flask, request, jsonify
 from binance.client import Client
-from binance.enums import *
 from binance.exceptions import BinanceAPIException
 import os
-import time
+import json
 import threading
 import queue
-import json
+import time
 
-# ===== ENV =====
+# ===== CONFIG =====
+SYMBOL = "ETHUSDT"
+LEVERAGE = 50
+LOT_SIZE = 0.01
+ORDER_DELAY = 1.0
+ALERT_COOLDOWN = 5
+
+# ===== BINANCE =====
 API_KEY = os.environ.get("BINANCE_API_KEY")
 API_SECRET = os.environ.get("BINANCE_API_SECRET")
 
 client = Client(API_KEY, API_SECRET)
+client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
 
+client.futures_change_leverage(
+    symbol=SYMBOL,
+    leverage=LEVERAGE
+)
+
+# ===== APP =====
 app = Flask(__name__)
 
-# ===== CONFIG =====
-ORDER_DELAY = 1.2
-ALERT_COOLDOWN = 10
-
+# ===== STATE =====
 recent_alerts = {}
 order_queue = queue.Queue()
 lock = threading.Lock()
 
-# ===== UTIL =====
-def safe_order(symbol, side, qty, position_side, reduce=False):
+# ===== ORDER =====
+def place_order(side):
 
     try:
 
         client.futures_create_order(
-            symbol=symbol,
-            side=SIDE_BUY if side=="BUY" else SIDE_SELL,
-            type=FUTURE_ORDER_TYPE_MARKET,
-            quantity=qty,
-            positionSide=position_side,
-            reduceOnly=reduce
+            symbol=SYMBOL,
+            side=side,
+            type="MARKET",
+            quantity=LOT_SIZE
         )
 
-        print("ORDER SENT",symbol,side,qty)
+        print("ORDER:",side)
 
     except BinanceAPIException as e:
 
-        print("BINANCE ERROR",e.message)
+        print("BINANCE ERROR:",e.message)
 
         if "1003" in str(e):
 
-            print("RATE LIMIT HIT - sleeping 60s")
+            print("RATE LIMIT - SLEEP")
             time.sleep(60)
 
-    except Exception as e:
-        print("UNKNOWN ERROR",e)
+# ===== WORKER =====
+def worker():
 
+    while True:
 
-# ===== ALERT HANDLER =====
-def handle_alert(data):
+        data = order_queue.get()
 
-    symbol = data["symbol"]
-    action = data["action"]
-    side = data["side"]
-    qty = float(data["amount"])
+        if data is None:
+            break
 
-    position_side = "LONG" if side=="BUY" else "SHORT"
+        side = data["side"]
 
-    if action == "OPEN":
+        place_order(side)
 
-        safe_order(symbol,side,qty,position_side,False)
+        time.sleep(ORDER_DELAY)
 
-    elif action == "CLOSE":
+        order_queue.task_done()
 
-        safe_order(symbol,side,qty,position_side,True)
+thread = threading.Thread(target=worker)
+thread.daemon = True
+thread.start()
 
-
-# ===== QUEUE =====
+# ===== ALERT QUEUE =====
 def enqueue_alert(data):
 
     alert_id = data.get("id")
+
     now = time.time()
 
     with lock:
@@ -83,63 +91,47 @@ def enqueue_alert(data):
         if alert_id in recent_alerts:
 
             if now - recent_alerts[alert_id] < ALERT_COOLDOWN:
-                print("DUPLICATE ALERT SKIPPED")
+
+                print("DUPLICATE ALERT")
+
                 return
 
         recent_alerts[alert_id] = now
 
     order_queue.put(data)
 
-
-# ===== WORKER =====
-def order_worker():
-
-    while True:
-
-        item = order_queue.get()
-
-        try:
-
-            handle_alert(item)
-
-        except Exception as e:
-
-            print("WORKER ERROR",e)
-
-        time.sleep(ORDER_DELAY)
-
-        order_queue.task_done()
-
-
-worker = threading.Thread(target=order_worker)
-worker.daemon = True
-worker.start()
-
-
-# ===== ROUTES =====
-@app.route("/",methods=["GET"])
-def home():
-    return jsonify({"status":"bot running"})
-
-
-@app.route("/webhook",methods=["POST"])
+# ===== ROUTE =====
+@app.route("/webhook", methods=["POST"])
 def webhook():
 
-    raw = request.data.decode("utf-8")
+    raw = request.data.decode()
 
     try:
+
         data = json.loads(raw)
+
     except:
+
         print("INVALID JSON")
+
+        return jsonify({"status":"ignored"})
+
+    if "side" not in data:
+
         return jsonify({"status":"ignored"})
 
     enqueue_alert(data)
 
     return jsonify({"status":"queued"})
 
+@app.route("/")
+def home():
+
+    return "bot running"
 
 # ===== RUN =====
 if __name__ == "__main__":
 
     port = int(os.environ.get("PORT",5000))
-    app.run(host="0.0.0.0",port=port)
+
+    app.run(host="0.0.0.0", port=port)
