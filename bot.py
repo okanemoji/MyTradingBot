@@ -11,8 +11,8 @@ import time
 SYMBOL = "ETHUSDT"
 LEVERAGE = 100
 LOT_SIZE = 2
-ORDER_DELAY = 1
-ALERT_COOLDOWN = 1
+ORDER_DELAY = 0.5   # delay หลังส่ง order
+ALERT_COOLDOWN = 1  # ป้องกัน duplicate alert
 
 # ===== BINANCE =====
 API_KEY = os.environ.get("BINANCE_API_KEY")
@@ -20,11 +20,7 @@ API_SECRET = os.environ.get("BINANCE_API_SECRET")
 
 client = Client(API_KEY, API_SECRET)
 client.FUTURES_URL = "https://testnet.binancefuture.com/fapi"
-
-client.futures_change_leverage(
-    symbol=SYMBOL,
-    leverage=LEVERAGE
-)
+client.futures_change_leverage(symbol=SYMBOL, leverage=LEVERAGE)
 
 # ===== APP =====
 app = Flask(__name__)
@@ -34,34 +30,24 @@ recent_alerts = {}
 order_queue = queue.Queue()
 lock = threading.Lock()
 
-# ===== GET POSITION =====
-def get_position():
-    positions = client.futures_position_information(symbol=SYMBOL)
-    for p in positions:
-        amt = float(p["positionAmt"])
-        if amt != 0:
-            return amt
-    return 0
+# เก็บ position ล่าสุดใน memory เพื่อลด API request
+current_position = 0
 
-# ===== PLACE ORDER (FLIP LOGIC) =====
+# ===== PLACE ORDER (FLIP LOGIC WITHOUT GET_POSITION) =====
 def place_order(side):
+    global current_position
+
     try:
-        pos = get_position()
         qty = LOT_SIZE
+        order_side = side.upper()
 
-        # ถ้า opposite side ให้ flip quantity
-        if side.upper() == "BUY":
-            order_side = "BUY"
-            if pos < 0:
-                qty = abs(pos) + LOT_SIZE
-        elif side.upper() == "SELL":
-            order_side = "SELL"
-            if pos > 0:
-                qty = abs(pos) + LOT_SIZE
-        else:
-            print("INVALID SIDE:", side)
-            return
+        # flip position ถ้าตรงข้าม
+        if order_side == "BUY" and current_position < 0:
+            qty = abs(current_position) + LOT_SIZE
+        elif order_side == "SELL" and current_position > 0:
+            qty = abs(current_position) + LOT_SIZE
 
+        # ส่ง order
         client.futures_create_order(
             symbol=SYMBOL,
             side=order_side,
@@ -70,6 +56,12 @@ def place_order(side):
         )
 
         print(time.strftime("%H:%M:%S"), "ORDER:", order_side, "QTY:", qty)
+
+        # อัปเดต position memory
+        if order_side == "BUY":
+            current_position += qty
+        else:
+            current_position -= qty
 
     except BinanceAPIException as e:
         print("BINANCE ERROR:", e.message)
