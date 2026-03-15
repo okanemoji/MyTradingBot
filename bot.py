@@ -10,7 +10,7 @@ import time
 # ===== CONFIG =====
 SYMBOL = "ETHUSDT"
 LEVERAGE = 100
-LOT_SIZE = 1
+LOT_SIZE = 2
 ORDER_DELAY = 1.0
 ALERT_COOLDOWN = 5
 
